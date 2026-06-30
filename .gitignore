@@ -1,0 +1,7 @@
+/target
+.DS_Store
+
+# Local Claude Code config -- not part of the project
+CLAUDE.md
+CLAUDE.local.md
+.claude/
