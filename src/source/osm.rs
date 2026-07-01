@@ -20,7 +20,7 @@ use geo_types::{
 use osmpbf::{Element, ElementReader, RelMemberType};
 
 use super::{FeatureSink, NodeStorage, SourceFeature};
-use crate::collection::{MmapNodeStore, NodeLocations, NodeStore};
+use crate::collection::{MmapNodeStore, NodeLocations, NodeStore, SparseNodeStore};
 use crate::error::{Error, Result};
 use crate::model::Value;
 
@@ -61,6 +61,7 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
     let mut locations: Box<dyn NodeStore> = match storage {
         NodeStorage::Ram => Box::new(NodeLocations::default()),
         NodeStorage::Mmap => Box::new(MmapNodeStore::new()?),
+        NodeStorage::Sparse => Box::new(SparseNodeStore::new()?),
     };
     let mut relations: Vec<PendingRelation> = Vec::new();
     let mut needed_ways: HashSet<i64> = HashSet::new();

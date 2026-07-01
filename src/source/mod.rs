@@ -29,8 +29,10 @@ pub enum NodeStorage {
     /// In-RAM node store (default).
     #[default]
     Ram,
-    /// Off-heap, memory-mapped node store (planet scale).
+    /// Off-heap, memory-mapped node store.
     Mmap,
+    /// Off-heap, run-compressed sparse node store (most compact; planet scale).
+    Sparse,
 }
 
 /// Stream a source file into `sink`, dispatching by extension: `.pbf` → OSM,

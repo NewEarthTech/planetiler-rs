@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use memmap2::Mmap;
 use tempfile::TempDir;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// Bytes per stored record: an 8-byte id followed by an 8-byte packed location.
 const RECORD: usize = 16;
@@ -229,6 +229,129 @@ impl MmapNodeStore {
     }
 }
 
+/// A run-compressed sparse node store — the compact, planet-scale layout.
+///
+/// Node locations stream to a temp file as 8-byte values in id-ascending order
+/// (no keys stored inline); a small in-RAM *run index* records each maximal run
+/// of consecutive ids as `(start_id, first_value_index)`. Lookup binary-searches
+/// the runs, then indexes straight into the memory-mapped values. This needs
+/// **ascending ids** (OSM pbf delivers them) and shrinks from 16 toward 8
+/// B/node as runs lengthen — reaching ~8 B/node at planet scale, where ids are
+/// dense (measured on rhode-island: ~11 B/node, avg run length 4.9).
+pub struct SparseNodeStore {
+    _dir: TempDir,
+    path: PathBuf,
+    /// `(start_id, first_value_index)` per run, appended in ascending `start_id`.
+    runs: Vec<(i64, u64)>,
+    writer: Option<BufWriter<File>>,
+    len: u64,
+    last_id: Option<i64>,
+    ascending: bool,
+    write_err: Option<std::io::Error>,
+    mmap: Option<Mmap>,
+}
+
+impl SparseNodeStore {
+    /// Bytes per stored value (packed lon/lat).
+    const VALUE: usize = 8;
+
+    /// Create an empty store backed by a fresh temp file.
+    ///
+    /// # Errors
+    /// Returns an error if the temp file cannot be created.
+    pub fn new() -> Result<Self> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("sparse-nodes.bin");
+        let writer = BufWriter::new(File::create(&path)?);
+        Ok(Self {
+            _dir: dir,
+            path,
+            runs: Vec::new(),
+            writer: Some(writer),
+            len: 0,
+            last_id: None,
+            ascending: true,
+            write_err: None,
+            mmap: None,
+        })
+    }
+
+    /// Append a node's location. Requires strictly ascending ids (enforced in
+    /// [`finish`](Self::finish)); a write error is captured and surfaced there.
+    pub fn put(&mut self, id: i64, lon: f64, lat: f64) {
+        if self.write_err.is_some() || !self.ascending {
+            return;
+        }
+        match self.last_id {
+            Some(last) if id <= last => {
+                self.ascending = false;
+                return;
+            }
+            Some(last) if id == last + 1 => {} // extends the current run
+            _ => self.runs.push((id, self.len)), // first node, or a gap: new run
+        }
+        self.last_id = Some(id);
+        let Some(writer) = self.writer.as_mut() else {
+            return;
+        };
+        match writer.write_all(&pack(lon, lat).to_ne_bytes()) {
+            Ok(()) => self.len += 1,
+            Err(err) => self.write_err = Some(err),
+        }
+    }
+
+    /// Finalize for lookups: flush and memory-map the values.
+    ///
+    /// # Errors
+    /// Returns an error on a captured write failure, non-ascending ids, or an
+    /// I/O failure flushing or mapping the file.
+    pub fn finish(&mut self) -> Result<()> {
+        if let Some(err) = self.write_err.take() {
+            return Err(err.into());
+        }
+        if !self.ascending {
+            return Err(Error::Source(
+                "sparse node store requires ascending node ids; use --storage ram or mmap",
+            ));
+        }
+        if let Some(mut writer) = self.writer.take() {
+            writer.flush()?;
+        }
+        let file = File::open(&self.path)?;
+        // SAFETY: fully written and no longer modified once the writer is dropped.
+        self.mmap = Some(unsafe { Mmap::map(&file)? });
+        Ok(())
+    }
+
+    /// Look up a node's `(lon, lat)`, or `None` if absent. Call [`finish`](Self::finish) first.
+    pub fn get(&self, id: i64) -> Option<(f64, f64)> {
+        let bytes = self.mmap.as_ref()?;
+        // The run that could contain `id` is the last one with `start_id <= id`.
+        let after = self.runs.partition_point(|&(start, _)| start <= id);
+        let &(start_id, start_index) = self.runs.get(after.checked_sub(1)?)?;
+        let run_end = self.runs.get(after).map_or(self.len, |&(_, next)| next);
+        let offset = (id - start_id) as u64;
+        if offset < run_end - start_index {
+            Some(unpack(read_u64(
+                bytes,
+                (start_index + offset) as usize * Self::VALUE,
+            )))
+        } else {
+            None // id falls in a gap between runs
+        }
+    }
+
+    /// Number of stored nodes.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether the store is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 fn read_i64(bytes: &[u8], offset: usize) -> i64 {
     i64::from_ne_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
@@ -274,6 +397,18 @@ impl NodeStore for MmapNodeStore {
     }
     fn get(&self, id: i64) -> Option<(f64, f64)> {
         MmapNodeStore::get(self, id)
+    }
+}
+
+impl NodeStore for SparseNodeStore {
+    fn put(&mut self, id: i64, lon: f64, lat: f64) {
+        SparseNodeStore::put(self, id, lon, lat);
+    }
+    fn finish(&mut self) -> Result<()> {
+        SparseNodeStore::finish(self)
+    }
+    fn get(&self, id: i64) -> Option<(f64, f64)> {
+        SparseNodeStore::get(self, id)
     }
 }
 
@@ -344,5 +479,32 @@ mod tests {
         store.finish().unwrap();
         assert!(store.is_empty());
         assert_eq!(store.get(1), None);
+    }
+
+    #[test]
+    fn sparse_round_trips_runs_and_gaps() {
+        let mut store = SparseNodeStore::new().unwrap();
+        // Two runs of consecutive ids with a gap between them.
+        for (id, c) in [(10, 1.0), (11, 1.1), (12, 1.2), (20, 2.0), (21, 2.1)] {
+            store.put(id, c, c);
+        }
+        store.finish().unwrap();
+        assert!(approx(store.get(10).unwrap(), (1.0, 1.0)));
+        assert!(approx(store.get(12).unwrap(), (1.2, 1.2)));
+        assert!(approx(store.get(20).unwrap(), (2.0, 2.0)));
+        assert!(approx(store.get(21).unwrap(), (2.1, 2.1)));
+        assert_eq!(store.get(13), None, "gap just after a run");
+        assert_eq!(store.get(17), None, "gap between runs");
+        assert_eq!(store.get(5), None, "before the first id");
+        assert_eq!(store.get(99), None, "after the last id");
+        assert_eq!(store.len(), 5);
+    }
+
+    #[test]
+    fn sparse_rejects_non_ascending_ids() {
+        let mut store = SparseNodeStore::new().unwrap();
+        store.put(10, 1.0, 1.0);
+        store.put(9, 2.0, 2.0); // out of order
+        assert!(store.finish().is_err());
     }
 }
