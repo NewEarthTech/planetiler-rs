@@ -37,6 +37,10 @@ pub enum Error {
     /// I/O failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// SQLite failure from the MBTiles archive writer.
+    #[error(transparent)]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 /// Convenience alias for results in this crate.

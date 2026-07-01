@@ -12,9 +12,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 prost = "0.14.4"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+flate2 = "1.1.9"
+serde_json = "1.0.150"
 
 [dev-dependencies]
 criterion = "0.5"
+tempfile = "3.27.0"
 
 [[bench]]
 name = "tile_coord"
