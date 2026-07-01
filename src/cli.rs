@@ -67,8 +67,8 @@ pub struct GenerateArgs {
     /// Tile compression: `gzip` or `none`.
     #[arg(long = "tile-compression", default_value = "gzip")]
     pub tile_compression: String,
-    /// Node-location storage for OSM: `ram` (default, fast) or `mmap` (off-heap,
-    /// for planet-scale extracts whose node store exceeds memory).
+    /// Node-location storage for OSM: `ram` (default, fast), `mmap` (off-heap),
+    /// or `sparse` (off-heap, run-compressed — most compact, for planet scale).
     #[arg(long, default_value = "ram")]
     pub storage: String,
     /// Archive `name` metadata.
@@ -101,7 +101,8 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
     let storage = match args.storage.as_str() {
         "ram" => NodeStorage::Ram,
         "mmap" => NodeStorage::Mmap,
-        other => anyhow::bail!("unknown --storage '{other}' (expected ram or mmap)"),
+        "sparse" => NodeStorage::Sparse,
+        other => anyhow::bail!("unknown --storage '{other}' (expected ram, mmap, or sparse)"),
     };
     if args.minzoom > args.maxzoom {
         anyhow::bail!(

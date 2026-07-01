@@ -10,5 +10,5 @@
 mod node_store;
 mod sort;
 
-pub use node_store::{MmapNodeStore, NodeLocations, NodeStore};
+pub use node_store::{MmapNodeStore, NodeLocations, NodeStore, SparseNodeStore};
 pub use sort::{ExternalMergeSort, SortedEntries};
