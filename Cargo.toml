@@ -2,5 +2,19 @@
 name = "planetiler-rs"
 version = "0.1.0"
 edition = "2024"
+description = "A Rust port of Planetiler: planet-scale vector tile generation from OpenStreetMap and other geodata."
+default-run = "planetiler-rs"
 
 [dependencies]
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "tile_coord"
+harness = false

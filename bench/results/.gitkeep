@@ -1,0 +1,2 @@
+# Head-to-head benchmark results (Rust vs Java) are written here and committed
+# for regression tracking. Kept in git so the trajectory is visible over time.

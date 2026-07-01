@@ -1,6 +1,11 @@
 /target
 .DS_Store
 
+# Benchmark head-to-head inputs and downloaded upstream artifacts (large binaries).
+# bench/results/ is intentionally tracked for regression history.
+/parity/upstream/
+/parity/data/
+
 # Local Claude Code config -- not part of the project
 CLAUDE.md
 CLAUDE.local.md
