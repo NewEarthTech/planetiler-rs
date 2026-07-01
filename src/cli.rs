@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::archive::TileCompression;
 use crate::pipeline::{GenerateOptions, generate_streaming};
 use crate::profile::PassthroughProfile;
-use crate::source::{osm_bounds, stream_source};
+use crate::source::{NodeStorage, osm_bounds, stream_source};
 
 /// planetiler-rs command-line interface.
 #[derive(Debug, Parser)]
@@ -67,6 +67,10 @@ pub struct GenerateArgs {
     /// Tile compression: `gzip` or `none`.
     #[arg(long = "tile-compression", default_value = "gzip")]
     pub tile_compression: String,
+    /// Node-location storage for OSM: `ram` (default, fast) or `mmap` (off-heap,
+    /// for planet-scale extracts whose node store exceeds memory).
+    #[arg(long, default_value = "ram")]
+    pub storage: String,
     /// Archive `name` metadata.
     #[arg(long)]
     pub name: Option<String>,
@@ -93,6 +97,11 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
         "gzip" => TileCompression::Gzip,
         "none" => TileCompression::None,
         other => anyhow::bail!("unknown --tile-compression '{other}' (expected gzip or none)"),
+    };
+    let storage = match args.storage.as_str() {
+        "ram" => NodeStorage::Ram,
+        "mmap" => NodeStorage::Mmap,
+        other => anyhow::bail!("unknown --storage '{other}' (expected ram or mmap)"),
     };
     if args.minzoom > args.maxzoom {
         anyhow::bail!(
@@ -140,7 +149,7 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
     };
     let profile = PassthroughProfile::new(args.layer);
     let stats = generate_streaming(
-        |sink| stream_source(&args.source, sink),
+        |sink| stream_source(&args.source, sink, storage),
         &profile,
         &options,
         &args.output,

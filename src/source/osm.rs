@@ -7,8 +7,9 @@
 //! of ways that relations reference; then relations are assembled (multipolygon
 //! ring-stitching + hole assignment, route multilinestrings). Features are
 //! pushed to a sink as they are produced ([`stream_osm`]), so the pipeline never
-//! holds them all. An off-heap `sparsearray` node store for planet scale is
-//! future work.
+//! holds them all. The node store is selectable via [`NodeStorage`] — in-RAM by
+//! default, or an off-heap mmap store for planet scale; a compact `sparsearray`
+//! variant is future work.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -18,8 +19,8 @@ use geo_types::{
 };
 use osmpbf::{Element, ElementReader, RelMemberType};
 
-use super::{FeatureSink, SourceFeature};
-use crate::collection::NodeLocations;
+use super::{FeatureSink, NodeStorage, SourceFeature};
+use crate::collection::{MmapNodeStore, NodeLocations, NodeStore};
 use crate::error::{Error, Result};
 use crate::model::Value;
 
@@ -56,8 +57,11 @@ struct PendingRelation {
 ///
 /// # Errors
 /// Returns [`Error::Source`] if the PBF cannot be read.
-pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
-    let mut locations = NodeLocations::default();
+pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> Result<()> {
+    let mut locations: Box<dyn NodeStore> = match storage {
+        NodeStorage::Ram => Box::new(NodeLocations::default()),
+        NodeStorage::Mmap => Box::new(MmapNodeStore::new()?),
+    };
     let mut relations: Vec<PendingRelation> = Vec::new();
     let mut needed_ways: HashSet<i64> = HashSet::new();
     // osmpbf's `for_each` closure can't return a Result, so capture the first
@@ -125,7 +129,7 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
     if let Some(err) = sink_err.take() {
         return Err(err);
     }
-    locations.finish();
+    locations.finish()?;
 
     // Pass 2: way features + capture member-way geometries for relations.
     let mut member_ways: HashMap<i64, Vec<(f64, f64)>> = HashMap::new();
@@ -177,10 +181,14 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
 /// [`stream_osm`] for large inputs.
 pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
     let mut features = Vec::new();
-    stream_osm(path.as_ref(), &mut |feature| {
-        features.push(feature);
-        Ok(())
-    })?;
+    stream_osm(
+        path.as_ref(),
+        &mut |feature| {
+            features.push(feature);
+            Ok(())
+        },
+        NodeStorage::Ram,
+    )?;
     Ok(features)
 }
 

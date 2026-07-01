@@ -22,11 +22,22 @@ use crate::model::Value;
 /// without materializing the whole extract in memory.
 pub type FeatureSink<'a> = dyn FnMut(SourceFeature) -> Result<()> + 'a;
 
+/// Which node-location store the OSM reader uses. RAM is fast and the default;
+/// mmap is off-heap for extracts whose node store would not fit in memory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NodeStorage {
+    /// In-RAM node store (default).
+    #[default]
+    Ram,
+    /// Off-heap, memory-mapped node store (planet scale).
+    Mmap,
+}
+
 /// Stream a source file into `sink`, dispatching by extension: `.pbf` → OSM,
-/// otherwise GeoJSON.
-pub fn stream_source(path: &Path, sink: &mut FeatureSink) -> Result<()> {
+/// otherwise GeoJSON. `storage` selects the OSM node store (ignored otherwise).
+pub fn stream_source(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> Result<()> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("pbf") => stream_osm(path, sink),
+        Some("pbf") => stream_osm(path, sink, storage),
         _ => stream_geojson(path, sink),
     }
 }
