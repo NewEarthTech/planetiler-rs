@@ -77,6 +77,10 @@ pub struct GenerateArgs {
     /// low-zoom mega-tiles when rendering large areas at low zoom.
     #[arg(long = "max-features-per-tile", default_value_t = 0)]
     pub max_features_per_tile: usize,
+    /// External-sort RAM budget in MB before spilling sorted chunks to disk.
+    /// Higher = less disk I/O (faster) at the cost of more memory.
+    #[arg(long = "sort-memory-mb", default_value_t = 256)]
+    pub sort_memory_mb: usize,
     /// Archive `name` metadata.
     #[arg(long)]
     pub name: Option<String>,
@@ -150,7 +154,7 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
         min_size_px: args.min_size,
         simplify_tolerance_px: args.simplify,
         bounds,
-        sort_memory_bytes: 256 << 20,
+        sort_memory_bytes: args.sort_memory_mb << 20,
         max_features_per_tile: args.max_features_per_tile,
         name: args.name,
         layer_type: "overlay".to_owned(),
