@@ -34,6 +34,10 @@ pub enum Error {
     #[error("malformed MVT tile: {0}")]
     MvtDecode(&'static str),
 
+    /// A source could not be read or contained unsupported data.
+    #[error("source error: {0}")]
+    Source(&'static str),
+
     /// I/O failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
