@@ -1,10 +1,11 @@
 //! OpenStreetMap `.osm.pbf` source reader (nodes + ways).
 //!
-//! Two passes: pass 1 records every node's location (the in-memory node-location
-//! store) and emits tagged nodes as point features; pass 2 assembles ways into
-//! line or polygon geometry from those locations. Relations/multipolygons and an
-//! off-heap node store come later. The whole extract is held in memory for now
-//! (fine for city/region extracts; streaming + `sparsearray` arrive in Phase 5).
+//! Two passes: pass 1 records every node's location (the compact in-memory
+//! [`NodeLocations`] store) and emits tagged nodes as point features; pass 2
+//! assembles ways into line or polygon geometry from those locations. Features
+//! are pushed to a sink as they are produced ([`stream_osm`]) so the pipeline
+//! never holds them all; only the node store stays resident. Relations and an
+//! off-heap `sparsearray` node store (for planet scale) come later.
 
 use std::collections::BTreeMap;
 use std::path::Path;

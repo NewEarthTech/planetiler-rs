@@ -8,16 +8,16 @@ Task: read an `.osm.pbf` extract and write all OSM features into a single `osm` 
 |---------|------|-----:|---------:|------:|
 | **monaco** (0.7 MB) | planetiler-rs | **0.089 s** | **69 MB** | 175 |
 | | Planetiler | 2.20 s | 1068 MB | 102 |
-| **rhode-island** (49 MB) | planetiler-rs | **4.80 s** | **1246 MB** | 7522 |
+| **rhode-island** (49 MB) | planetiler-rs | **4.21 s** | **680 MB** | 7522 |
 | | Planetiler | 8.94 s | 7814 MB | 2203 |
 
-**Speed:** ~25× faster on monaco → **~1.9× faster** on rhode-island. **Memory:** ~15× less on monaco → **~6.3× less** on rhode-island.
+**Speed:** ~25× faster on monaco → **~2.1× faster** on rhode-island. **Memory:** ~15× less on monaco → **~11.5× less** on rhode-island.
 
 ## Reading the trend (honest)
 
-- **The time margin compresses with size** (25× → 1.9×) because monaco is so small that JVM cold-start (~1.5 s) dominates Planetiler's wall time. On rhode-island Java warms up and parallelizes, so ~1.9× is closer to the real steady-state speed advantage. We are still faster — but the honest headline speed number is ~2×, not ~25×.
-- **The memory margin holds** (~6.3× at rhode-island) — this is the core reason for the rewrite (no GC, no reserved JVM heap) and it survives warm-up. Planetiler even *failed* to run monaco under `-Xmx512m` / `-Xmx256m`; it needs a large default heap.
-- **But our absolute memory scales with input** (69 MB → 1246 MB, ~25× the 49 MB input): we still read the whole extract into RAM (all node locations + all features). We win at city/region scale, but that linear growth is the ceiling that blocks planet scale until the reader **streams** and the node store goes **off-heap** — which is exactly what Planetiler's architecture does. That is Phase 5, and it is the prerequisite for any planet-scale claim.
+- **The time margin compresses with size** (25× → 2.1×) because monaco is so small that JVM cold-start (~1.5 s) dominates Planetiler's wall time. On rhode-island Java warms up and parallelizes, so ~2× is closer to the real steady-state speed advantage. We are still faster — but the honest headline speed number is ~2×, not ~25×.
+- **The memory margin holds and widens** (~11.5× at rhode-island) — the core reason for the rewrite (no GC, no reserved JVM heap), and it survives warm-up. Planetiler even *failed* to run monaco under `-Xmx512m` / `-Xmx256m`; it needs a large default heap.
+- **Our absolute memory now scales sub-linearly** (69 MB → 680 MB, ~14× the 49 MB input, down from ~25×) after the reader was made **streaming** and the node store **compacted** (fixed-point, 16 B/node): we no longer hold all features at once. Two in-RAM structures remain — the node-location store and the sort buffer (both bounded/tunable, both mmap-able) — so full planet scale still needs the off-heap `sparsearray` node store, but the linear-in-feature-count ceiling is gone.
 
 ## Caveats (a strong directional win, not verified parity)
 

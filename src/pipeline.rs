@@ -1,12 +1,13 @@
-//! Generation pipeline (Phase 3: external-sort streaming).
+//! Generation pipeline: streaming, external-sort, multi-core.
 //!
-//! Ties the stages together: read source features, run them through a
-//! [`Profile`] into a [`FeatureCollector`], render each emitted feature into
-//! per-tile pieces, serialize each piece into a [`model::Entry`](crate::model)
-//! keyed by its sort key, and feed them to an [`ExternalMergeSort`]. Then stream
-//! the sorted entries, grouping consecutive same-tile records, and encode + write
-//! each tile to an [`MbtilesWriter`]. Memory is bounded by the sort buffer plus
-//! one tile's features (the worker-parallel path comes next).
+//! Ties the stages together: a streaming source pushes each feature to a sink,
+//! which runs it through a [`Profile`] into a [`FeatureCollector`]; batches are
+//! rendered into per-tile pieces across cores, serialized into
+//! [`model::Entry`](crate::model) records keyed by sort key, and fed to an
+//! [`ExternalMergeSort`]. The sorted entries are then streamed, grouped into
+//! whole tiles, and encoded + compressed in parallel before the single writer
+//! inserts them. Peak memory is bounded by one render batch, the sort buffer,
+//! and (for OSM) the node store — never the whole input or all tiles.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
