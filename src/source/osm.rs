@@ -1,26 +1,32 @@
-//! OpenStreetMap `.osm.pbf` source reader (nodes + ways).
+//! OpenStreetMap `.osm.pbf` source reader (nodes, ways, relations).
 //!
-//! Two passes: pass 1 records every node's location (the compact in-memory
-//! [`NodeLocations`] store) and emits tagged nodes as point features; pass 2
-//! assembles ways into line or polygon geometry from those locations. Features
-//! are pushed to a sink as they are produced ([`stream_osm`]) so the pipeline
-//! never holds them all; only the node store stays resident. Relations and an
-//! off-heap `sparsearray` node store (for planet scale) come later.
+//! Two file passes plus a relation-assembly step: pass 1 records every node's
+//! location (the compact in-memory [`NodeLocations`] store), emits tagged nodes
+//! as point features, and collects multipolygon/route relation definitions;
+//! pass 2 assembles ways into line/polygon geometry and captures the geometries
+//! of ways that relations reference; then relations are assembled (multipolygon
+//! ring-stitching + hole assignment, route multilinestrings). Features are
+//! pushed to a sink as they are produced ([`stream_osm`]), so the pipeline never
+//! holds them all. An off-heap `sparsearray` node store for planet scale is
+//! future work.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
-use geo_types::{Coord, Geometry, LineString, Point, Polygon};
-use osmpbf::{Element, ElementReader};
+use geo_types::{
+    Coord, Geometry, LineString, MultiLineString, MultiPolygon, Point, Polygon, coord,
+};
+use osmpbf::{Element, ElementReader, RelMemberType};
 
 use super::{FeatureSink, SourceFeature};
 use crate::collection::NodeLocations;
 use crate::error::{Error, Result};
 use crate::model::Value;
 
-/// Planetiler-style feature id: `osm_id * 10 + source_type` (node=1, way=2).
+/// Planetiler-style feature id: `osm_id * 10 + source_type`.
 const NODE_KIND: u64 = 1;
 const WAY_KIND: u64 = 2;
+const RELATION_KIND: u64 = 3;
 
 /// Tag keys that make a *closed* way an area (polygon) rather than a line.
 const AREA_KEYS: &[&str] = &[
@@ -28,17 +34,37 @@ const AREA_KEYS: &[&str] = &[
     "shop", "tourism", "man_made", "water", "waterway", "aeroway", "craft", "office",
 ];
 
-/// Read nodes and ways from an `.osm.pbf` file into [`SourceFeature`]s.
+/// The relation types this reader assembles.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelationKind {
+    /// `type=multipolygon` / `type=boundary` → polygon with holes.
+    MultiPolygon,
+    /// `type=route` → multilinestring.
+    Route,
+}
+
+/// A relation collected in pass 1, assembled after pass 2.
+struct PendingRelation {
+    id: i64,
+    kind: RelationKind,
+    tags: BTreeMap<String, Value>,
+    /// `(way_id, is_inner)` members, in order.
+    members: Vec<(i64, bool)>,
+}
+
+/// Stream nodes, ways, and relations from an `.osm.pbf` into `sink`.
 ///
 /// # Errors
 /// Returns [`Error::Source`] if the PBF cannot be read.
 pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
     let mut locations = NodeLocations::default();
+    let mut relations: Vec<PendingRelation> = Vec::new();
+    let mut needed_ways: HashSet<i64> = HashSet::new();
     // osmpbf's `for_each` closure can't return a Result, so capture the first
     // sink error and skip the rest, then propagate it after the pass.
     let mut sink_err: Option<Error> = None;
 
-    // Pass 1: record all node locations; emit tagged nodes as points.
+    // Pass 1: node locations + point features + relation definitions.
     reader(path)?
         .for_each(|element| match element {
             Element::Node(node) => {
@@ -63,7 +89,24 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
                     &mut sink_err,
                 );
             }
-            Element::Way(_) | Element::Relation(_) => {}
+            Element::Relation(relation) => {
+                let tags = collect_tags(relation.tags());
+                if let Some(kind) = relation_kind(&tags) {
+                    let members: Vec<(i64, bool)> = relation
+                        .members()
+                        .filter(|m| m.member_type == RelMemberType::Way)
+                        .map(|m| (m.member_id, m.role().unwrap_or("") == "inner"))
+                        .collect();
+                    needed_ways.extend(members.iter().map(|&(id, _)| id));
+                    relations.push(PendingRelation {
+                        id: relation.id(),
+                        kind,
+                        tags,
+                        members,
+                    });
+                }
+            }
+            Element::Way(_) => {}
         })
         .map_err(|_| Error::Source("failed to read OSM PBF (node pass)"))?;
     if let Some(err) = sink_err.take() {
@@ -71,20 +114,21 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
     }
     locations.finish();
 
-    // Pass 2: assemble tagged ways from node locations.
+    // Pass 2: way features + capture member-way geometries for relations.
+    let mut member_ways: HashMap<i64, Vec<(f64, f64)>> = HashMap::new();
     reader(path)?
         .for_each(|element| {
             if sink_err.is_some() {
                 return;
             }
             if let Element::Way(way) = element {
-                let tags = collect_tags(way.tags());
-                if tags.is_empty() {
-                    return;
-                }
                 let coords: Vec<(f64, f64)> =
                     way.refs().filter_map(|id| locations.get(id)).collect();
-                if coords.len() < 2 {
+                if needed_ways.contains(&way.id()) {
+                    member_ways.insert(way.id(), coords.clone());
+                }
+                let tags = collect_tags(way.tags());
+                if tags.is_empty() || coords.len() < 2 {
                     return;
                 }
                 if let Some(feature) = way_feature(way.id(), &coords, tags)
@@ -97,6 +141,13 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
         .map_err(|_| Error::Source("failed to read OSM PBF (way pass)"))?;
     if let Some(err) = sink_err.take() {
         return Err(err);
+    }
+
+    // Assemble relations from their (now known) member geometries.
+    for relation in relations {
+        if let Some(feature) = assemble_relation(&relation, &member_ways) {
+            sink(feature)?;
+        }
     }
     Ok(())
 }
@@ -146,11 +197,10 @@ fn way_feature(
     tags: BTreeMap<String, Value>,
 ) -> Option<SourceFeature> {
     let closed = coords.len() >= 4 && coords.first() == coords.last();
-    let ring: Vec<Coord<f64>> = coords.iter().map(|&(x, y)| Coord { x, y }).collect();
     let geometry = if closed && is_area(&tags) {
-        Geometry::Polygon(Polygon::new(LineString(ring), vec![]))
+        Geometry::Polygon(Polygon::new(line_string(coords), vec![]))
     } else {
-        Geometry::LineString(LineString(ring))
+        Geometry::LineString(line_string(coords))
     };
     Some(SourceFeature {
         id: feature_id(id, WAY_KIND),
@@ -182,6 +232,148 @@ fn is_area(tags: &BTreeMap<String, Value>) -> bool {
     AREA_KEYS.iter().any(|k| tags.contains_key(*k))
 }
 
+// --- relations ---------------------------------------------------------------
+
+fn relation_kind(tags: &BTreeMap<String, Value>) -> Option<RelationKind> {
+    match tags.get("type").and_then(Value::as_str) {
+        Some("multipolygon" | "boundary") => Some(RelationKind::MultiPolygon),
+        Some("route") => Some(RelationKind::Route),
+        _ => None,
+    }
+}
+
+fn assemble_relation(
+    relation: &PendingRelation,
+    member_ways: &HashMap<i64, Vec<(f64, f64)>>,
+) -> Option<SourceFeature> {
+    let geometry = match relation.kind {
+        RelationKind::MultiPolygon => assemble_multipolygon(relation, member_ways)?,
+        RelationKind::Route => assemble_route(relation, member_ways)?,
+    };
+    Some(SourceFeature {
+        id: feature_id(relation.id, RELATION_KIND),
+        geometry,
+        tags: relation.tags.clone(),
+    })
+}
+
+fn assemble_multipolygon(
+    relation: &PendingRelation,
+    member_ways: &HashMap<i64, Vec<(f64, f64)>>,
+) -> Option<Geometry<f64>> {
+    let mut outer_fragments = Vec::new();
+    let mut inner_fragments = Vec::new();
+    for &(way_id, is_inner) in &relation.members {
+        if let Some(coords) = member_ways.get(&way_id) {
+            if is_inner {
+                inner_fragments.push(coords.clone());
+            } else {
+                outer_fragments.push(coords.clone());
+            }
+        }
+    }
+
+    let outer_rings = assemble_rings(outer_fragments);
+    let inner_rings = assemble_rings(inner_fragments);
+    if outer_rings.is_empty() {
+        return None;
+    }
+
+    let polygons: Vec<Polygon<f64>> = outer_rings
+        .iter()
+        .map(|outer| {
+            let holes: Vec<LineString<f64>> = inner_rings
+                .iter()
+                .filter(|inner| ring_contains(outer, inner[0]))
+                .map(|inner| line_string(inner))
+                .collect();
+            Polygon::new(line_string(outer), holes)
+        })
+        .collect();
+
+    Some(if polygons.len() == 1 {
+        Geometry::Polygon(polygons.into_iter().next().unwrap())
+    } else {
+        Geometry::MultiPolygon(MultiPolygon(polygons))
+    })
+}
+
+fn assemble_route(
+    relation: &PendingRelation,
+    member_ways: &HashMap<i64, Vec<(f64, f64)>>,
+) -> Option<Geometry<f64>> {
+    let lines: Vec<LineString<f64>> = relation
+        .members
+        .iter()
+        .filter_map(|&(way_id, _)| member_ways.get(&way_id))
+        .filter(|coords| coords.len() >= 2)
+        .map(|coords| line_string(coords))
+        .collect();
+    (!lines.is_empty()).then_some(Geometry::MultiLineString(MultiLineString(lines)))
+}
+
+/// Stitch way fragments into closed rings by connecting matching endpoints
+/// (member ways share exact node coordinates, so equality matching is safe).
+fn assemble_rings(fragments: Vec<Vec<(f64, f64)>>) -> Vec<Vec<(f64, f64)>> {
+    let mut rings = Vec::new();
+    let mut pending: VecDeque<Vec<(f64, f64)>> =
+        fragments.into_iter().filter(|f| f.len() >= 2).collect();
+
+    while let Some(mut ring) = pending.pop_front() {
+        loop {
+            if is_closed(&ring) {
+                break;
+            }
+            let end = *ring.last().unwrap();
+            let Some(index) = pending
+                .iter()
+                .position(|w| w.first() == Some(&end) || w.last() == Some(&end))
+            else {
+                break; // cannot extend or close this ring
+            };
+            let next = pending.remove(index).unwrap();
+            if next.first() == Some(&end) {
+                ring.extend_from_slice(&next[1..]);
+            } else {
+                ring.extend(next.iter().rev().skip(1).copied());
+            }
+        }
+        if is_closed(&ring) {
+            rings.push(ring);
+        }
+    }
+    rings
+}
+
+fn is_closed(ring: &[(f64, f64)]) -> bool {
+    ring.len() >= 4 && ring.first() == ring.last()
+}
+
+/// Ray-casting point-in-polygon against a (closed) ring.
+fn ring_contains(ring: &[(f64, f64)], (px, py): (f64, f64)) -> bool {
+    let mut inside = false;
+    let n = ring.len();
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = ring[i];
+        let (xj, yj) = ring[j];
+        if (yi > py) != (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+fn line_string(coords: &[(f64, f64)]) -> LineString<f64> {
+    LineString(
+        coords
+            .iter()
+            .map(|&(x, y)| coord! { x: x, y: y })
+            .collect::<Vec<Coord<f64>>>(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,7 +395,6 @@ mod tests {
 
     #[test]
     fn closed_highway_stays_line() {
-        // A roundabout: closed but a line, not a polygon.
         let loop_ = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)];
         let f = way_feature(
             2,
@@ -226,5 +417,60 @@ mod tests {
         let square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)];
         let f = way_feature(4, &square, tags(&[("landuse", "grass"), ("area", "no")])).unwrap();
         assert!(matches!(f.geometry, Geometry::LineString(_)));
+    }
+
+    #[test]
+    fn stitches_two_open_fragments_into_a_ring() {
+        // Two halves of a square that share endpoints.
+        let a = vec![(0.0, 0.0), (2.0, 0.0), (2.0, 2.0)];
+        let b = vec![(2.0, 2.0), (0.0, 2.0), (0.0, 0.0)];
+        let rings = assemble_rings(vec![a, b]);
+        assert_eq!(rings.len(), 1);
+        assert!(is_closed(&rings[0]));
+    }
+
+    #[test]
+    fn multipolygon_assigns_hole_to_outer() {
+        let outer = vec![
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (0.0, 10.0),
+            (0.0, 0.0),
+        ];
+        let inner = vec![(3.0, 3.0), (6.0, 3.0), (6.0, 6.0), (3.0, 6.0), (3.0, 3.0)];
+        let mut member_ways = HashMap::new();
+        member_ways.insert(1, outer);
+        member_ways.insert(2, inner);
+        let relation = PendingRelation {
+            id: 7,
+            kind: RelationKind::MultiPolygon,
+            tags: tags(&[("type", "multipolygon"), ("natural", "water")]),
+            members: vec![(1, false), (2, true)],
+        };
+        let feature = assemble_relation(&relation, &member_ways).unwrap();
+        assert_eq!(feature.id, feature_id(7, RELATION_KIND));
+        match feature.geometry {
+            Geometry::Polygon(p) => assert_eq!(p.interiors().len(), 1, "the inner ring is a hole"),
+            other => panic!("expected polygon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_relation_is_multilinestring() {
+        let mut member_ways = HashMap::new();
+        member_ways.insert(1, vec![(0.0, 0.0), (1.0, 1.0)]);
+        member_ways.insert(2, vec![(1.0, 1.0), (2.0, 2.0)]);
+        let relation = PendingRelation {
+            id: 8,
+            kind: RelationKind::Route,
+            tags: tags(&[("type", "route"), ("route", "bicycle")]),
+            members: vec![(1, false), (2, false)],
+        };
+        let feature = assemble_relation(&relation, &member_ways).unwrap();
+        match feature.geometry {
+            Geometry::MultiLineString(mls) => assert_eq!(mls.0.len(), 2),
+            other => panic!("expected multilinestring, got {other:?}"),
+        }
     }
 }
