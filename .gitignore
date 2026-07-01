@@ -1,6 +1,10 @@
 /target
 .DS_Store
 
+# Generated tile archives (e.g. example/demo output).
+*.mbtiles
+*.pmtiles
+
 # Benchmark head-to-head inputs and downloaded upstream artifacts (large binaries).
 # bench/results/ is intentionally tracked for regression history.
 /parity/upstream/
