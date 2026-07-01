@@ -1,18 +1,19 @@
 //! Feature rendering: geometry → tiles.
 //!
-//! Projects a profile's lon/lat [`VectorFeature`] into web-mercator world space,
-//! then for each zoom in its range slices it into every covering tile: transform
-//! to tile-local extent coordinates, clip to the tile-plus-buffer rectangle,
-//! quantize to the integer grid, fix polygon winding, and emit one
-//! [`RenderedFeature`] per covering tile. This is the hardest correctness code
-//! in the pipeline.
+//! For each zoom in a feature's range: project the lon/lat geometry into
+//! web-mercator world space, scale it into that zoom's tile-extent space,
+//! simplify (Douglas–Peucker, zoom-dependent tolerance), drop it if it is below
+//! the minimum on-screen size, then slice it into every covering tile — clip to
+//! the tile-plus-buffer rectangle, quantize to the integer grid, fix winding —
+//! emitting one [`RenderedFeature`] per covering tile. This is the hardest
+//! correctness code in the pipeline.
 //!
-//! Rendering emits per-feature (bounded by that feature's tile span) rather than
-//! accumulating every tile in memory; the pipeline serializes each emitted
-//! feature into a `model::Entry` and sorts them externally. Zoom-dependent
-//! simplification and min-size filtering are still to come.
+//! Rendering emits per-feature (bounded by that feature's tile span); the
+//! pipeline serializes each emitted feature into a `model::Entry` and sorts them
+//! externally, so memory never holds every tile at once.
 
 mod clip;
+mod simplify;
 
 use std::collections::BTreeMap;
 
@@ -24,9 +25,31 @@ use crate::mvt;
 use crate::profile::VectorFeature;
 use clip::Rect;
 
+/// Number of screen pixels per tile edge (the mercator "world" tile size).
+const TILE_PIXELS: f64 = 256.0;
+
+/// Rendering parameters.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderOptions {
+    /// Lowest zoom to render (inclusive).
+    pub min_zoom: u8,
+    /// Highest zoom to render (inclusive).
+    pub max_zoom: u8,
+    /// Tile extent (grid units per edge).
+    pub extent: u32,
+    /// Tile buffer in extent units.
+    pub buffer: f64,
+    /// Drop features whose on-screen size is below this many pixels (`0` keeps
+    /// everything). Points are never dropped.
+    pub min_size_px: f64,
+    /// Douglas–Peucker tolerance in pixels (`0` disables simplification).
+    pub simplify_tolerance_px: f64,
+}
+
 /// Geometry reduced to a single kind, with Multi* flattened. Coordinates are in
-/// web-mercator world space (`[0, 1]`), Y down. Polygon rings carry no repeated
-/// closing vertex.
+/// web-mercator world space (`[0, 1]`) after [`extract`], then scaled per zoom
+/// into tile-extent space. Y is down; polygon rings carry no repeated closing
+/// vertex.
 enum RenderGeometry {
     Points(Vec<(f64, f64)>),
     Lines(Vec<Vec<(f64, f64)>>),
@@ -53,51 +76,53 @@ pub struct RenderedFeature {
 }
 
 /// Render one vector feature into every covering tile across its zoom range
-/// (intersected with `[min_zoom, max_zoom]`), returning one
-/// [`RenderedFeature`] per covering tile.
-pub fn render_feature(
-    feature: &VectorFeature,
-    min_zoom: u8,
-    max_zoom: u8,
-    extent: u32,
-    buffer: f64,
-) -> Vec<RenderedFeature> {
+/// (intersected with the options' range), returning one [`RenderedFeature`] per
+/// covering tile.
+pub fn render_feature(feature: &VectorFeature, options: &RenderOptions) -> Vec<RenderedFeature> {
     let mut out = Vec::new();
-    let Some(geometry) = extract(&feature.geometry) else {
+    let Some(world) = extract(&feature.geometry) else {
         return out;
     };
-    let min_z = feature.min_zoom.max(min_zoom);
-    let max_z = feature.max_zoom.min(max_zoom);
+    let min_z = feature.min_zoom.max(options.min_zoom);
+    let max_z = feature.max_zoom.min(options.max_zoom);
     for z in min_z..=max_z {
-        render_at_zoom(feature, &geometry, z, extent, buffer, &mut out);
+        render_at_zoom(feature, &world, z, options, &mut out);
     }
     out
 }
 
 fn render_at_zoom(
     feature: &VectorFeature,
-    geometry: &RenderGeometry,
+    world: &RenderGeometry,
     z: u8,
-    extent_units: u32,
-    buffer: f64,
+    options: &RenderOptions,
     out: &mut Vec<RenderedFeature>,
 ) {
     let n = f64::from(TileCoord::axis_tiles(z));
-    let extent = f64::from(extent_units);
-    let buffer_frac = buffer / extent;
-    let max_tile = TileCoord::axis_tiles(z) - 1;
+    let extent = f64::from(options.extent);
+    let px = extent / TILE_PIXELS; // tile-extent units per screen pixel
 
-    let (min_fx, min_fy, max_fx, max_fy) = bbox_tile_fractional(geometry, n);
-    let tx0 = clamp_tile(min_fx - buffer_frac, max_tile);
-    let tx1 = clamp_tile(max_fx + buffer_frac, max_tile);
-    let ty0 = clamp_tile(min_fy - buffer_frac, max_tile);
-    let ty1 = clamp_tile(max_fy + buffer_frac, max_tile);
+    // World -> this zoom's global tile-extent space.
+    let mut geometry = scale_geometry(world, n * extent);
+    if options.simplify_tolerance_px > 0.0 {
+        simplify_geometry(&mut geometry, options.simplify_tolerance_px * px);
+    }
+    if options.min_size_px > 0.0 && feature_pixel_size(&geometry, px) < options.min_size_px {
+        return;
+    }
+
+    let buffer = options.buffer;
+    let max_tile = TileCoord::axis_tiles(z) - 1;
+    let (min_x, min_y, max_x, max_y) = bounds(&geometry);
+    let tx0 = clamp_tile((min_x - buffer) / extent, max_tile);
+    let tx1 = clamp_tile((max_x + buffer) / extent, max_tile);
+    let ty0 = clamp_tile((min_y - buffer) / extent, max_tile);
+    let ty1 = clamp_tile((max_y + buffer) / extent, max_tile);
 
     let rect = Rect::new(-buffer, -buffer, extent + buffer, extent + buffer);
-
     for tx in tx0..=tx1 {
         for ty in ty0..=ty1 {
-            let Some(geometry) = clip_to_tile(geometry, n, tx, ty, extent, &rect) else {
+            let Some(tile_geometry) = clip_to_tile(&geometry, tx, ty, extent, &rect) else {
                 continue;
             };
             out.push(RenderedFeature {
@@ -105,7 +130,7 @@ fn render_at_zoom(
                 layer: feature.layer.clone(),
                 zorder: feature.zorder,
                 id: feature.id,
-                geometry,
+                geometry: tile_geometry,
                 attrs: feature.attrs.clone(),
             });
         }
@@ -156,22 +181,92 @@ fn extract(geometry: &Geometry<f64>) -> Option<RenderGeometry> {
     })
 }
 
+// --- per-zoom transform / simplify / min-size --------------------------------
+
+fn scale_geometry(geometry: &RenderGeometry, scale: f64) -> RenderGeometry {
+    let s = |(x, y): (f64, f64)| (x * scale, y * scale);
+    let scale_path = |path: &Vec<(f64, f64)>| path.iter().map(|&c| s(c)).collect::<Vec<_>>();
+    match geometry {
+        RenderGeometry::Points(points) => {
+            RenderGeometry::Points(points.iter().map(|&c| s(c)).collect())
+        }
+        RenderGeometry::Lines(lines) => {
+            RenderGeometry::Lines(lines.iter().map(scale_path).collect())
+        }
+        RenderGeometry::Polygons(polygons) => RenderGeometry::Polygons(
+            polygons
+                .iter()
+                .map(|rings| rings.iter().map(scale_path).collect())
+                .collect(),
+        ),
+    }
+}
+
+fn simplify_geometry(geometry: &mut RenderGeometry, tolerance: f64) {
+    match geometry {
+        RenderGeometry::Points(_) => {}
+        RenderGeometry::Lines(lines) => {
+            for line in lines.iter_mut() {
+                *line = simplify::simplify(line, tolerance);
+            }
+        }
+        RenderGeometry::Polygons(polygons) => {
+            for rings in polygons.iter_mut() {
+                for ring in rings.iter_mut() {
+                    *ring = simplify::simplify(ring, tolerance);
+                }
+            }
+        }
+    }
+}
+
+/// The feature's representative on-screen size in pixels (line length, or
+/// `sqrt(area)` for polygons). Points are treated as always large enough.
+fn feature_pixel_size(geometry: &RenderGeometry, px: f64) -> f64 {
+    match geometry {
+        RenderGeometry::Points(_) => f64::INFINITY,
+        RenderGeometry::Lines(lines) => lines.iter().map(|l| path_length(l)).sum::<f64>() / px,
+        RenderGeometry::Polygons(polygons) => {
+            let area: f64 = polygons
+                .iter()
+                .filter_map(|rings| rings.first())
+                .map(|r| ring_area(r).abs())
+                .sum();
+            area.sqrt() / px
+        }
+    }
+}
+
+fn path_length(points: &[(f64, f64)]) -> f64 {
+    points
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+        .sum()
+}
+
+/// Signed area of a ring (positive or negative depending on winding).
+fn ring_area(ring: &[(f64, f64)]) -> f64 {
+    let n = ring.len();
+    let mut area = 0.0;
+    for i in 0..n {
+        let (x1, y1) = ring[i];
+        let (x2, y2) = ring[(i + 1) % n];
+        area += x1 * y2 - x2 * y1;
+    }
+    area / 2.0
+}
+
 // --- per-tile clipping / quantization ---------------------------------------
 
 fn clip_to_tile(
     geometry: &RenderGeometry,
-    n: f64,
     tx: u32,
     ty: u32,
     extent: f64,
     rect: &Rect,
 ) -> Option<mvt::Geometry> {
-    let to_local = |(wx, wy): (f64, f64)| {
-        (
-            wx.mul_add(n, -(tx as f64)) * extent,
-            wy.mul_add(n, -(ty as f64)) * extent,
-        )
-    };
+    let (ox, oy) = (f64::from(tx) * extent, f64::from(ty) * extent);
+    let to_local = |(gx, gy): (f64, f64)| (gx - ox, gy - oy);
 
     match geometry {
         RenderGeometry::Points(points) => {
@@ -263,23 +358,20 @@ fn orient(ring: &mut [(i32, i32)], exterior: bool) {
     }
 }
 
-fn bbox_tile_fractional(geometry: &RenderGeometry, n: f64) -> (f64, f64, f64, f64) {
+fn bounds(geometry: &RenderGeometry) -> (f64, f64, f64, f64) {
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
     let mut max_y = f64::NEG_INFINITY;
-    let mut update = |(wx, wy): (f64, f64)| {
-        let (fx, fy) = (wx * n, wy * n);
-        min_x = min_x.min(fx);
-        min_y = min_y.min(fy);
-        max_x = max_x.max(fx);
-        max_y = max_y.max(fy);
+    let mut update = |(x, y): (f64, f64)| {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
     };
     match geometry {
         RenderGeometry::Points(points) => points.iter().for_each(|&p| update(p)),
-        RenderGeometry::Lines(lines) => {
-            lines.iter().flatten().for_each(|&p| update(p));
-        }
+        RenderGeometry::Lines(lines) => lines.iter().flatten().for_each(|&p| update(p)),
         RenderGeometry::Polygons(polygons) => {
             polygons.iter().flatten().flatten().for_each(|&p| update(p));
         }
@@ -311,6 +403,18 @@ mod tests {
         world_to_lng_lat(wx, wy)
     }
 
+    /// Options with min-size and simplification off, for deterministic slicing.
+    fn opts(min_zoom: u8, max_zoom: u8) -> RenderOptions {
+        RenderOptions {
+            min_zoom,
+            max_zoom,
+            extent: 4096,
+            buffer: 0.0,
+            min_size_px: 0.0,
+            simplify_tolerance_px: 0.0,
+        }
+    }
+
     fn feature(geometry: Geometry<f64>, min_zoom: u8, max_zoom: u8) -> VectorFeature {
         VectorFeature {
             id: 0,
@@ -327,7 +431,7 @@ mod tests {
     fn point_lands_in_one_tile_inside_extent() {
         let (lng, lat) = ll(0.3, 0.3);
         let f = feature(Geometry::Point(Point::new(lng, lat)), 3, 3);
-        let rendered = render_feature(&f, 0, 14, 4096, 0.0);
+        let rendered = render_feature(&f, &opts(0, 14));
         assert_eq!(rendered.len(), 1);
         assert_eq!(rendered[0].coord.z(), 3);
         match &rendered[0].geometry {
@@ -345,7 +449,7 @@ mod tests {
         let b = ll(0.7, 0.25);
         let line = LineString(vec![coord! {x: a.0, y: a.1}, coord! {x: b.0, y: b.1}]);
         let f = feature(Geometry::LineString(line), 1, 1);
-        let rendered = render_feature(&f, 0, 14, 4096, 0.0);
+        let rendered = render_feature(&f, &opts(0, 14));
         assert_eq!(rendered.len(), 2, "line spans two tiles");
         for r in &rendered {
             assert!(matches!(r.geometry, mvt::Geometry::Lines(_)));
@@ -367,7 +471,7 @@ mod tests {
             1,
             1,
         );
-        let rendered = render_feature(&f, 0, 14, 4096, 0.0);
+        let rendered = render_feature(&f, &opts(0, 14));
         assert_eq!(rendered.len(), 4, "polygon covers all four z1 tiles");
         for r in &rendered {
             match &r.geometry {
@@ -384,11 +488,57 @@ mod tests {
     fn zoom_range_is_intersected_with_global() {
         let (lng, lat) = ll(0.3, 0.3);
         let f = feature(Geometry::Point(Point::new(lng, lat)), 2, 5);
-        let mut zooms: Vec<u8> = render_feature(&f, 3, 4, 4096, 0.0)
+        let mut zooms: Vec<u8> = render_feature(&f, &opts(3, 4))
             .iter()
             .map(|r| r.coord.z())
             .collect();
         zooms.sort_unstable();
         assert_eq!(zooms, vec![3, 4]);
+    }
+
+    #[test]
+    fn min_size_drops_tiny_features_at_low_zoom() {
+        // A ~0.0002-world-wide line: sub-pixel at z0, sizeable by z14.
+        let a = ll(0.5, 0.5);
+        let b = ll(0.5002, 0.5);
+        let line = LineString(vec![coord! {x: a.0, y: a.1}, coord! {x: b.0, y: b.1}]);
+        let f = feature(Geometry::LineString(line), 0, 14);
+        let options = RenderOptions {
+            min_size_px: 1.0,
+            ..opts(0, 14)
+        };
+        let zooms: Vec<u8> = render_feature(&f, &options)
+            .iter()
+            .map(|r| r.coord.z())
+            .collect();
+        assert!(!zooms.contains(&0), "sub-pixel at z0 is dropped");
+        assert!(zooms.contains(&14), "kept at z14");
+    }
+
+    #[test]
+    fn simplification_reduces_vertices() {
+        // A near-straight line densely sampled; simplification collapses it.
+        let mut coords = Vec::new();
+        for i in 0..=20 {
+            let (lng, lat) = ll(0.3 + f64::from(i) * 0.001, 0.5);
+            coords.push(coord! {x: lng, y: lat});
+        }
+        let f = feature(Geometry::LineString(LineString(coords)), 6, 6);
+        let plain = render_feature(&f, &opts(0, 14));
+        let simplified = render_feature(
+            &f,
+            &RenderOptions {
+                simplify_tolerance_px: 2.0,
+                ..opts(0, 14)
+            },
+        );
+        let count = |rs: &[RenderedFeature]| match &rs[0].geometry {
+            mvt::Geometry::Lines(l) => l[0].len(),
+            _ => 0,
+        };
+        assert!(
+            count(&simplified) < count(&plain),
+            "simplify reduces vertex count"
+        );
     }
 }

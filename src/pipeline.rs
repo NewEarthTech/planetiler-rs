@@ -22,7 +22,7 @@ use crate::geom::TileCoord;
 use crate::model::{Entry, MAX_LAYER, SortKey, Value};
 use crate::mvt::{self, encode_tile};
 use crate::profile::{FeatureCollector, Profile, VectorFeature};
-use crate::render::render_feature;
+use crate::render::{RenderOptions, render_feature};
 use crate::source::SourceFeature;
 
 /// Generation options (a subset of the eventual CLI surface).
@@ -38,6 +38,10 @@ pub struct GenerateOptions {
     pub buffer: f64,
     /// Per-tile compression.
     pub compression: TileCompression,
+    /// Drop features smaller than this many screen pixels per zoom (`0` keeps all).
+    pub min_size_px: f64,
+    /// Douglas–Peucker simplification tolerance in pixels (`0` disables it).
+    pub simplify_tolerance_px: f64,
     /// Approximate RAM budget for the external sort before spilling to disk.
     pub sort_memory_bytes: usize,
     /// Archive `name` metadata.
@@ -54,6 +58,8 @@ impl Default for GenerateOptions {
             extent: 4096,
             buffer: 64.0,
             compression: TileCompression::Gzip,
+            min_size_px: 1.0,
+            simplify_tolerance_px: 0.0,
             sort_memory_bytes: 64 << 20,
             name: None,
             layer_type: "overlay".to_owned(),
@@ -82,19 +88,22 @@ pub fn generate(
     let mut layer_stats: BTreeMap<String, LayerStat> = BTreeMap::new();
     let mut bounds = Bounds::default();
 
+    let render_options = RenderOptions {
+        min_zoom: options.min_zoom,
+        max_zoom: options.max_zoom,
+        extent: options.extent,
+        buffer: options.buffer,
+        min_size_px: options.min_size_px,
+        simplify_tolerance_px: options.simplify_tolerance_px,
+    };
+
     for source in features {
         bounds.add_geometry(&source.geometry);
         let mut collector = FeatureCollector::new(source, options.min_zoom, options.max_zoom);
         profile.process_feature(source, &mut collector);
         for feature in collector.into_features() {
             record_layer_stats(&mut layer_stats, &feature, options);
-            for rendered in render_feature(
-                &feature,
-                options.min_zoom,
-                options.max_zoom,
-                options.extent,
-                options.buffer,
-            ) {
+            for rendered in render_feature(&feature, &render_options) {
                 let layer = registry.intern(&rendered.layer)?;
                 let key = SortKey::new(rendered.coord, layer, rendered.zorder)?;
                 let blob = encode_blob(&FeatureBlob {

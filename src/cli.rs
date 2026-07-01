@@ -53,6 +53,12 @@ pub struct GenerateArgs {
     /// Tile buffer in extent units.
     #[arg(long, default_value_t = 64.0)]
     pub buffer: f64,
+    /// Drop features smaller than this many screen pixels per zoom (0 keeps all).
+    #[arg(long = "min-size", default_value_t = 1.0)]
+    pub min_size: f64,
+    /// Douglas–Peucker simplification tolerance in pixels (0 disables).
+    #[arg(long, default_value_t = 0.0)]
+    pub simplify: f64,
     /// Tile compression: `gzip` or `none`.
     #[arg(long = "tile-compression", default_value = "gzip")]
     pub tile_compression: String,
@@ -110,6 +116,8 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
         extent: 4096,
         buffer: args.buffer,
         compression,
+        min_size_px: args.min_size,
+        simplify_tolerance_px: args.simplify,
         sort_memory_bytes: 256 << 20,
         name: args.name,
         layer_type: "overlay".to_owned(),
