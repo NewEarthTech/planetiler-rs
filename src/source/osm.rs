@@ -69,11 +69,14 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
         .for_each(|element| match element {
             Element::Node(node) => {
                 locations.put(node.id(), node.lon(), node.lat());
+                let info = node.info();
                 emit_node(
                     node.id(),
                     node.lon(),
                     node.lat(),
                     collect_tags(node.tags()),
+                    info.version(),
+                    info.milli_timestamp(),
                     sink,
                     &mut sink_err,
                 );
@@ -85,12 +88,14 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
                     node.lon(),
                     node.lat(),
                     collect_tags(node.tags()),
+                    node.info().map(|i| i.version()),
+                    node.info().map(|i| i.milli_timestamp()),
                     sink,
                     &mut sink_err,
                 );
             }
             Element::Relation(relation) => {
-                let tags = collect_tags(relation.tags());
+                let mut tags = collect_tags(relation.tags());
                 if let Some(kind) = relation_kind(&tags) {
                     let members: Vec<(i64, bool)> = relation
                         .members()
@@ -98,6 +103,14 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
                         .map(|m| (m.member_id, m.role().unwrap_or("") == "inner"))
                         .collect();
                     needed_ways.extend(members.iter().map(|&(id, _)| id));
+                    let info = relation.info();
+                    add_metadata(
+                        &mut tags,
+                        relation.id(),
+                        "relation",
+                        info.version(),
+                        info.milli_timestamp(),
+                    );
                     relations.push(PendingRelation {
                         id: relation.id(),
                         kind,
@@ -127,10 +140,18 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
                 if needed_ways.contains(&way.id()) {
                     member_ways.insert(way.id(), coords.clone());
                 }
-                let tags = collect_tags(way.tags());
+                let mut tags = collect_tags(way.tags());
                 if tags.is_empty() || coords.len() < 2 {
                     return;
                 }
+                let info = way.info();
+                add_metadata(
+                    &mut tags,
+                    way.id(),
+                    "way",
+                    info.version(),
+                    info.milli_timestamp(),
+                );
                 if let Some(feature) = way_feature(way.id(), &coords, tags)
                     && let Err(err) = sink(feature)
                 {
@@ -178,19 +199,43 @@ pub fn osm_bounds(path: &Path) -> Result<Option<(f64, f64, f64, f64)>> {
     Ok(header.bbox().map(|b| (b.left, b.bottom, b.right, b.top)))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_node(
     id: i64,
     lon: f64,
     lat: f64,
-    tags: BTreeMap<String, Value>,
+    mut tags: BTreeMap<String, Value>,
+    version: Option<i32>,
+    timestamp_millis: Option<i64>,
     sink: &mut FeatureSink,
     sink_err: &mut Option<Error>,
 ) {
     if tags.is_empty() || sink_err.is_some() {
         return;
     }
+    add_metadata(&mut tags, id, "node", version, timestamp_millis);
     if let Err(err) = sink(point(id, lon, lat, tags)) {
         *sink_err = Some(err);
+    }
+}
+
+/// Add the `osm-qa`-style element-metadata attributes (`@id`, `@type`,
+/// `@version`, `@timestamp` in epoch seconds) that Planetiler's osm-qa profile
+/// attaches to every feature.
+fn add_metadata(
+    tags: &mut BTreeMap<String, Value>,
+    id: i64,
+    element_type: &str,
+    version: Option<i32>,
+    timestamp_millis: Option<i64>,
+) {
+    tags.insert("@id".to_owned(), Value::Int(id));
+    tags.insert("@type".to_owned(), Value::String(element_type.to_owned()));
+    if let Some(version) = version {
+        tags.insert("@version".to_owned(), Value::Int(i64::from(version)));
+    }
+    if let Some(millis) = timestamp_millis {
+        tags.insert("@timestamp".to_owned(), Value::Int(millis / 1000));
     }
 }
 

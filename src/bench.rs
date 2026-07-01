@@ -108,9 +108,12 @@ pub struct ArchiveComparison {
     pub only_b: usize,
     /// Tiles present in both archives.
     pub shared: usize,
-    /// Shared tiles that are semantically identical (decode-equal).
+    /// Shared tiles that are semantically identical (decode-equal, order and all).
     pub identical: usize,
-    /// Shared tiles that differ.
+    /// Shared tiles with the same feature content but a different within-layer
+    /// order (content parity, not draw-order parity). Excludes `identical`.
+    pub content_equal: usize,
+    /// Shared tiles whose content differs (feature selection/geometry/attrs).
     pub differing: usize,
     /// Total decoded features in the first archive.
     pub features_a: usize,
@@ -120,6 +123,9 @@ pub struct ArchiveComparison {
     pub layers_a: std::collections::BTreeSet<String>,
     /// Layer names seen in the second archive.
     pub layers_b: std::collections::BTreeSet<String>,
+    /// A dump of the first feature of the first differing shared tile from each
+    /// side, to eyeball what differs (ids, geometry, attributes).
+    pub sample: Option<String>,
 }
 
 impl std::fmt::Display for ArchiveComparison {
@@ -131,13 +137,74 @@ impl std::fmt::Display for ArchiveComparison {
         )?;
         writeln!(
             f,
-            "shared:  identical={} differing={}",
-            self.identical, self.differing
+            "shared:  identical={} content_equal={} differing={}",
+            self.identical, self.content_equal, self.differing
         )?;
         writeln!(f, "features: a={} b={}", self.features_a, self.features_b)?;
         writeln!(f, "layers_a ({}): {:?}", self.layers_a.len(), self.layers_a)?;
-        write!(f, "layers_b ({}): {:?}", self.layers_b.len(), self.layers_b)
+        writeln!(f, "layers_b ({}): {:?}", self.layers_b.len(), self.layers_b)?;
+        if let Some(sample) = &self.sample {
+            write!(f, "{sample}")?;
+        }
+        Ok(())
     }
+}
+
+/// For the first differing shared tile, find a feature id present in *both* and
+/// show how the two versions differ (geometry/attrs); failing that, report the
+/// id-set difference so we can see whether ids or selection are the problem.
+fn sample_first_feature(
+    coord: crate::geom::TileCoord,
+    a: &crate::mvt::Tile,
+    b: &crate::mvt::Tile,
+) -> String {
+    use std::collections::BTreeMap;
+    // id -> (rotation-canonical form, raw Debug for display)
+    let index = |tile: &crate::mvt::Tile| -> BTreeMap<u64, (String, String)> {
+        tile.layers
+            .first()
+            .map(|l| {
+                l.features
+                    .iter()
+                    .map(|f| (f.id, (canonical_feature(f), format!("{f:?}"))))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (ia, ib) = (index(a), index(b));
+    let header = format!(
+        "first differing tile z{}/{}/{}",
+        coord.z(),
+        coord.x(),
+        coord.y()
+    );
+
+    for (id, (canon_a, raw_a)) in &ia {
+        if let Some((canon_b, raw_b)) = ib.get(id)
+            && canon_a != canon_b
+        {
+            return format!(
+                "{header}\n  shared feature id={id} differs (beyond ring rotation):\n  A: {raw_a}\n  B: {raw_b}"
+            );
+        }
+    }
+    let only_a: Vec<u64> = ia
+        .keys()
+        .filter(|k| !ib.contains_key(k))
+        .take(6)
+        .copied()
+        .collect();
+    let only_b: Vec<u64> = ib
+        .keys()
+        .filter(|k| !ia.contains_key(k))
+        .take(6)
+        .copied()
+        .collect();
+    format!(
+        "{header}\n  no shared feature id differs; |A|={} |B|={}\n  ids only in A (sample): {only_a:?}\n  ids only in B (sample): {only_b:?}",
+        ia.len(),
+        ib.len(),
+    )
 }
 
 /// Compare two MBTiles archives semantically: decode every tile in each and
@@ -163,7 +230,14 @@ pub fn compare_archives(
                 if crate::mvt::semantically_equal(tile, other) {
                     report.identical += 1;
                 } else {
-                    report.differing += 1;
+                    if tile_content_equal(tile, other) {
+                        report.content_equal += 1;
+                    } else {
+                        report.differing += 1;
+                    }
+                    if report.sample.is_none() {
+                        report.sample = Some(sample_first_feature(*coord, tile, other));
+                    }
                 }
             }
         }
@@ -178,6 +252,50 @@ pub fn compare_archives(
         }
     }
     Ok(report)
+}
+
+/// Whether two tiles have the same feature content ignoring within-layer order:
+/// per layer (by name), the multiset of features must match. Features are keyed
+/// by their rotation-canonical form ([`canonical_feature`]) so a polygon ring
+/// that merely starts at a different vertex counts as equal — same polygon.
+fn tile_content_equal(a: &crate::mvt::Tile, b: &crate::mvt::Tile) -> bool {
+    let index = |tile: &crate::mvt::Tile| -> std::collections::BTreeMap<String, Vec<String>> {
+        tile.layers
+            .iter()
+            .map(|layer| {
+                let mut features: Vec<String> =
+                    layer.features.iter().map(canonical_feature).collect();
+                features.sort();
+                (layer.name.clone(), features)
+            })
+            .collect()
+    };
+    index(a) == index(b)
+}
+
+/// A canonical string form of a feature (id + geometry + attributes) with each
+/// polygon ring rotated to start at its minimum vertex. Ring start-vertex is not
+/// semantically meaningful in MVT, so this makes the comparison rotation-blind.
+fn canonical_feature(feature: &crate::mvt::Feature) -> String {
+    let geometry = match &feature.geometry {
+        crate::mvt::Geometry::Polygons(rings) => {
+            // Rotate each ring to a canonical start, then sort the rings so a
+            // multipolygon that lists its rings in a different order still matches.
+            let mut canon: Vec<Vec<(i32, i32)>> = rings.iter().map(|r| rotate_to_min(r)).collect();
+            canon.sort();
+            crate::mvt::Geometry::Polygons(canon)
+        }
+        other => other.clone(),
+    };
+    format!("id={} {:?} {:?}", feature.id, geometry, feature.attributes)
+}
+
+/// Rotate a ring so it starts at its lexicographically smallest vertex.
+fn rotate_to_min(ring: &[(i32, i32)]) -> Vec<(i32, i32)> {
+    match (0..ring.len()).min_by_key(|&i| ring[i]) {
+        Some(k) => ring[k..].iter().chain(&ring[..k]).copied().collect(),
+        None => Vec::new(),
+    }
 }
 
 /// Read an MBTiles archive into decoded tiles (handles the compact `tiles` view,
@@ -216,6 +334,118 @@ fn read_archive(
         out.insert(coord, tile);
     }
     Ok(out)
+}
+
+/// Render one tile from each archive into a single overlaid SVG for visual
+/// parity checks: the first archive draws blue, the second red, so agreement
+/// blends to purple and any divergence shows as pure blue or red. MVT tile space
+/// (y-down, extent 4096) maps straight to SVG user space.
+pub fn render_tiles_svg(
+    archives: &[std::path::PathBuf],
+    z: u8,
+    x: u32,
+    y: u32,
+) -> anyhow::Result<String> {
+    // First archive draws as a translucent blue fill; a second archive draws as
+    // a red outline on top, so agreement is a red edge hugging every blue shape
+    // and any divergence shows as blue with no red (or red away from blue).
+    const STYLES: [(&str, &str); 2] = [
+        ("rgba(30,90,220,0.35)", "rgb(20,70,200)"),
+        ("none", "rgba(220,25,20,0.9)"),
+    ];
+    let mut body = String::new();
+    for (i, path) in archives.iter().enumerate() {
+        let (fill, stroke) = STYLES[i.min(STYLES.len() - 1)];
+        match read_tile(path, z, x, y)? {
+            Some(tile) => body.push_str(&tile_group_svg(&tile, fill, stroke)),
+            None => body.push_str(&format!(
+                "<!-- no tile {z}/{x}/{y} in {} -->",
+                path.display()
+            )),
+        }
+    }
+    Ok(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"-128 -128 4352 4352\" width=\"768\" height=\"768\">\
+         <rect x=\"-128\" y=\"-128\" width=\"4352\" height=\"4352\" fill=\"white\"/>\
+         <rect x=\"0\" y=\"0\" width=\"4096\" height=\"4096\" fill=\"none\" stroke=\"#ccc\" stroke-width=\"2\"/>\
+         {body}</svg>"
+    ))
+}
+
+/// An SVG `<g>` drawing one tile's geometry with the given fill/stroke.
+fn tile_group_svg(tile: &crate::mvt::Tile, fill: &str, stroke: &str) -> String {
+    use crate::mvt::Geometry;
+    let mut s = format!(
+        "<g fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"4\" stroke-linejoin=\"round\">"
+    );
+    for layer in &tile.layers {
+        for feature in &layer.features {
+            match &feature.geometry {
+                Geometry::Polygons(rings) => {
+                    let mut d = String::new();
+                    for ring in rings {
+                        if let Some((x0, y0)) = ring.first() {
+                            d.push_str(&format!("M{x0} {y0}"));
+                            for (px, py) in &ring[1..] {
+                                d.push_str(&format!("L{px} {py}"));
+                            }
+                            d.push('Z');
+                        }
+                    }
+                    s.push_str(&format!("<path d=\"{d}\" fill-rule=\"evenodd\"/>"));
+                }
+                Geometry::Lines(lines) => {
+                    for line in lines {
+                        let pts: String =
+                            line.iter().map(|(px, py)| format!("{px},{py} ")).collect();
+                        s.push_str(&format!("<polyline points=\"{pts}\" fill=\"none\"/>"));
+                    }
+                }
+                Geometry::Points(points) => {
+                    for (px, py) in points {
+                        s.push_str(&format!(
+                            "<circle cx=\"{px}\" cy=\"{py}\" r=\"10\" stroke=\"none\"/>"
+                        ));
+                    }
+                }
+                Geometry::Unknown => {}
+            }
+        }
+    }
+    s.push_str("</g>");
+    s
+}
+
+/// Read and decode a single tile (`z`/`x`/`y` in XYZ) from an archive.
+fn read_tile(
+    path: &std::path::Path,
+    z: u8,
+    x: u32,
+    y: u32,
+) -> anyhow::Result<Option<crate::mvt::Tile>> {
+    use rusqlite::OptionalExtension;
+    use std::io::Read;
+    let conn = rusqlite::Connection::open(path)?;
+    let tms_y = (1u32 << z) - 1 - y;
+    let blob: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT tile_data FROM tiles WHERE zoom_level=?1 AND tile_column=?2 AND tile_row=?3",
+            rusqlite::params![z, x, tms_y],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(blob) = blob else { return Ok(None) };
+    let raw = if blob.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = flate2::read::GzDecoder::new(blob.as_slice());
+        let mut buf = Vec::new();
+        decoder.read_to_end(&mut buf)?;
+        buf
+    } else {
+        blob
+    };
+    Ok(Some(
+        crate::mvt::decode_tile(&raw).map_err(|e| anyhow::anyhow!("{e}"))?,
+    ))
 }
 
 #[cfg(test)]
