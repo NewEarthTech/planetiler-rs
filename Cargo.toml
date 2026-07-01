@@ -24,5 +24,13 @@ tempfile = "3.27.0"
 name = "tile_coord"
 harness = false
 
+[[bench]]
+name = "mvt"
+harness = false
+
+[[bench]]
+name = "mbtiles"
+harness = false
+
 [build-dependencies]
 prost-build = "0.14.4"

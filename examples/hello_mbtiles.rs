@@ -15,11 +15,16 @@ use planetiler_rs::model::Value;
 use planetiler_rs::mvt::{Feature, Geometry, Layer, Tile, encode_tile};
 
 fn attrs(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
-    pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect()
+    pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect()
 }
 
 fn main() -> anyhow::Result<()> {
-    let out = std::env::args().nth(1).unwrap_or_else(|| "hello.mbtiles".to_owned());
+    let out = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "hello.mbtiles".to_owned());
 
     // One web-mercator tile over Monaco (upstream's default example area).
     let z = 14u8;
