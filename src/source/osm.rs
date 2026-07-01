@@ -6,13 +6,14 @@
 //! off-heap node store come later. The whole extract is held in memory for now
 //! (fine for city/region extracts; streaming + `sparsearray` arrive in Phase 5).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use geo_types::{Coord, Geometry, LineString, Point, Polygon};
 use osmpbf::{Element, ElementReader};
 
 use super::SourceFeature;
+use crate::collection::NodeLocations;
 use crate::error::{Error, Result};
 use crate::model::Value;
 
@@ -32,21 +33,21 @@ const AREA_KEYS: &[&str] = &[
 /// Returns [`Error::Source`] if the PBF cannot be read.
 pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
     let path = path.as_ref();
-    let mut locations: HashMap<i64, (f64, f64)> = HashMap::new();
+    let mut locations = NodeLocations::default();
     let mut features: Vec<SourceFeature> = Vec::new();
 
     // Pass 1: record all node locations; emit tagged nodes as points.
     reader(path)?
         .for_each(|element| match element {
             Element::Node(node) => {
-                locations.insert(node.id(), (node.lon(), node.lat()));
+                locations.put(node.id(), node.lon(), node.lat());
                 let tags = collect_tags(node.tags());
                 if !tags.is_empty() {
                     features.push(point(node.id(), node.lon(), node.lat(), tags));
                 }
             }
             Element::DenseNode(node) => {
-                locations.insert(node.id(), (node.lon(), node.lat()));
+                locations.put(node.id(), node.lon(), node.lat());
                 let tags = collect_tags(node.tags());
                 if !tags.is_empty() {
                     features.push(point(node.id(), node.lon(), node.lat(), tags));
@@ -55,6 +56,7 @@ pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
             Element::Way(_) | Element::Relation(_) => {}
         })
         .map_err(|_| Error::Source("failed to read OSM PBF (node pass)"))?;
+    locations.finish();
 
     // Pass 2: assemble tagged ways from node locations.
     reader(path)?
@@ -64,10 +66,8 @@ pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
                 if tags.is_empty() {
                     return;
                 }
-                let coords: Vec<(f64, f64)> = way
-                    .refs()
-                    .filter_map(|id| locations.get(&id).copied())
-                    .collect();
+                let coords: Vec<(f64, f64)> =
+                    way.refs().filter_map(|id| locations.get(id)).collect();
                 if coords.len() < 2 {
                     return;
                 }

@@ -7,6 +7,8 @@
 //! tile at once. The node-location `LongLongMap` store joins this module in
 //! Phase 4.
 
+mod node_store;
 mod sort;
 
+pub use node_store::NodeLocations;
 pub use sort::{ExternalMergeSort, SortedEntries};
