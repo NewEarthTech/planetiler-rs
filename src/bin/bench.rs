@@ -38,6 +38,21 @@ enum Command {
         /// Second archive (e.g. Planetiler output).
         b: PathBuf,
     },
+    /// Render a tile to SVG for visual inspection; two archives overlay
+    /// (blue = first, red = second) so divergence is visible.
+    Render {
+        /// Zoom level.
+        z: u8,
+        /// Tile column (x).
+        x: u32,
+        /// Tile row (y, in XYZ convention).
+        y: u32,
+        /// Output SVG path.
+        out: PathBuf,
+        /// One or two MBTiles archives to draw.
+        #[arg(required = true, num_args = 1..=2)]
+        archives: Vec<PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -55,6 +70,17 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Compare { a, b } => {
             println!("{}", compare_archives(&a, &b)?);
+        }
+        Command::Render {
+            z,
+            x,
+            y,
+            out,
+            archives,
+        } => {
+            let svg = planetiler_rs::bench::render_tiles_svg(&archives, z, x, y)?;
+            std::fs::write(&out, svg)?;
+            println!("wrote {}", out.display());
         }
     }
     Ok(())

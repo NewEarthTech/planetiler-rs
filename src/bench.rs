@@ -336,6 +336,118 @@ fn read_archive(
     Ok(out)
 }
 
+/// Render one tile from each archive into a single overlaid SVG for visual
+/// parity checks: the first archive draws blue, the second red, so agreement
+/// blends to purple and any divergence shows as pure blue or red. MVT tile space
+/// (y-down, extent 4096) maps straight to SVG user space.
+pub fn render_tiles_svg(
+    archives: &[std::path::PathBuf],
+    z: u8,
+    x: u32,
+    y: u32,
+) -> anyhow::Result<String> {
+    // First archive draws as a translucent blue fill; a second archive draws as
+    // a red outline on top, so agreement is a red edge hugging every blue shape
+    // and any divergence shows as blue with no red (or red away from blue).
+    const STYLES: [(&str, &str); 2] = [
+        ("rgba(30,90,220,0.35)", "rgb(20,70,200)"),
+        ("none", "rgba(220,25,20,0.9)"),
+    ];
+    let mut body = String::new();
+    for (i, path) in archives.iter().enumerate() {
+        let (fill, stroke) = STYLES[i.min(STYLES.len() - 1)];
+        match read_tile(path, z, x, y)? {
+            Some(tile) => body.push_str(&tile_group_svg(&tile, fill, stroke)),
+            None => body.push_str(&format!(
+                "<!-- no tile {z}/{x}/{y} in {} -->",
+                path.display()
+            )),
+        }
+    }
+    Ok(format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"-128 -128 4352 4352\" width=\"768\" height=\"768\">\
+         <rect x=\"-128\" y=\"-128\" width=\"4352\" height=\"4352\" fill=\"white\"/>\
+         <rect x=\"0\" y=\"0\" width=\"4096\" height=\"4096\" fill=\"none\" stroke=\"#ccc\" stroke-width=\"2\"/>\
+         {body}</svg>"
+    ))
+}
+
+/// An SVG `<g>` drawing one tile's geometry with the given fill/stroke.
+fn tile_group_svg(tile: &crate::mvt::Tile, fill: &str, stroke: &str) -> String {
+    use crate::mvt::Geometry;
+    let mut s = format!(
+        "<g fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"4\" stroke-linejoin=\"round\">"
+    );
+    for layer in &tile.layers {
+        for feature in &layer.features {
+            match &feature.geometry {
+                Geometry::Polygons(rings) => {
+                    let mut d = String::new();
+                    for ring in rings {
+                        if let Some((x0, y0)) = ring.first() {
+                            d.push_str(&format!("M{x0} {y0}"));
+                            for (px, py) in &ring[1..] {
+                                d.push_str(&format!("L{px} {py}"));
+                            }
+                            d.push('Z');
+                        }
+                    }
+                    s.push_str(&format!("<path d=\"{d}\" fill-rule=\"evenodd\"/>"));
+                }
+                Geometry::Lines(lines) => {
+                    for line in lines {
+                        let pts: String =
+                            line.iter().map(|(px, py)| format!("{px},{py} ")).collect();
+                        s.push_str(&format!("<polyline points=\"{pts}\" fill=\"none\"/>"));
+                    }
+                }
+                Geometry::Points(points) => {
+                    for (px, py) in points {
+                        s.push_str(&format!(
+                            "<circle cx=\"{px}\" cy=\"{py}\" r=\"10\" stroke=\"none\"/>"
+                        ));
+                    }
+                }
+                Geometry::Unknown => {}
+            }
+        }
+    }
+    s.push_str("</g>");
+    s
+}
+
+/// Read and decode a single tile (`z`/`x`/`y` in XYZ) from an archive.
+fn read_tile(
+    path: &std::path::Path,
+    z: u8,
+    x: u32,
+    y: u32,
+) -> anyhow::Result<Option<crate::mvt::Tile>> {
+    use rusqlite::OptionalExtension;
+    use std::io::Read;
+    let conn = rusqlite::Connection::open(path)?;
+    let tms_y = (1u32 << z) - 1 - y;
+    let blob: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT tile_data FROM tiles WHERE zoom_level=?1 AND tile_column=?2 AND tile_row=?3",
+            rusqlite::params![z, x, tms_y],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(blob) = blob else { return Ok(None) };
+    let raw = if blob.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = flate2::read::GzDecoder::new(blob.as_slice());
+        let mut buf = Vec::new();
+        decoder.read_to_end(&mut buf)?;
+        buf
+    } else {
+        blob
+    };
+    Ok(Some(
+        crate::mvt::decode_tile(&raw).map_err(|e| anyhow::anyhow!("{e}"))?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
