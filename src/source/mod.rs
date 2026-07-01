@@ -8,7 +8,7 @@ mod geojson;
 mod osm;
 
 pub use geojson::{read_geojson, stream_geojson};
-pub use osm::{read_osm, stream_osm};
+pub use osm::{osm_bounds, read_osm, stream_osm};
 
 use std::collections::BTreeMap;
 use std::path::Path;

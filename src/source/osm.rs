@@ -163,6 +163,21 @@ pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
     Ok(features)
 }
 
+/// Read the `.osm.pbf` header's bounding box (lon/lat `west, south, east,
+/// north`), if present — the natural default tile bounds, matching Planetiler.
+pub fn osm_bounds(path: &Path) -> Result<Option<(f64, f64, f64, f64)>> {
+    let mut reader =
+        osmpbf::BlobReader::from_path(path).map_err(|_| Error::Source("cannot open OSM PBF"))?;
+    let Some(blob) = reader.next() else {
+        return Ok(None);
+    };
+    let blob = blob.map_err(|_| Error::Source("cannot read OSM PBF header"))?;
+    let Ok(header) = blob.to_headerblock() else {
+        return Ok(None);
+    };
+    Ok(header.bbox().map(|b| (b.left, b.bottom, b.right, b.top)))
+}
+
 fn emit_node(
     id: i64,
     lon: f64,

@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::archive::TileCompression;
 use crate::pipeline::{GenerateOptions, generate_streaming};
 use crate::profile::PassthroughProfile;
-use crate::source::stream_source;
+use crate::source::{osm_bounds, stream_source};
 
 /// planetiler-rs command-line interface.
 #[derive(Debug, Parser)]
@@ -59,6 +59,11 @@ pub struct GenerateArgs {
     /// Douglas–Peucker simplification tolerance in pixels (0 disables).
     #[arg(long, default_value_t = 0.0)]
     pub simplify: f64,
+    /// Only emit tiles within these lon/lat bounds `west,south,east,north`.
+    /// Defaults to the OSM source's header bbox (like Planetiler); pass `world`
+    /// to disable clipping.
+    #[arg(long)]
+    pub bounds: Option<String>,
     /// Tile compression: `gzip` or `none`.
     #[arg(long = "tile-compression", default_value = "gzip")]
     pub tile_compression: String,
@@ -109,6 +114,17 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
 
     tracing::info!(source = %args.source.display(), "streaming source");
 
+    // Default tile bounds to the OSM source's header bbox (matching Planetiler);
+    // an explicit `--bounds w,s,e,n` overrides, `--bounds world` disables.
+    let bounds = match args.bounds.as_deref() {
+        Some("world") | Some("planet") => None,
+        Some(spec) => Some(parse_bounds(spec)?),
+        None if args.source.extension().and_then(|e| e.to_str()) == Some("pbf") => {
+            osm_bounds(&args.source)?
+        }
+        None => None,
+    };
+
     let options = GenerateOptions {
         min_zoom: args.minzoom,
         max_zoom: args.maxzoom,
@@ -117,6 +133,7 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
         compression,
         min_size_px: args.min_size,
         simplify_tolerance_px: args.simplify,
+        bounds,
         sort_memory_bytes: 256 << 20,
         name: args.name,
         layer_type: "overlay".to_owned(),
@@ -138,6 +155,15 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
         args.maxzoom,
     );
     Ok(())
+}
+
+/// Parse a `west,south,east,north` bounds string.
+fn parse_bounds(spec: &str) -> anyhow::Result<(f64, f64, f64, f64)> {
+    let parts: Result<Vec<f64>, _> = spec.split(',').map(|p| p.trim().parse::<f64>()).collect();
+    match parts.ok().as_deref() {
+        Some([west, south, east, north]) => Ok((*west, *south, *east, *north)),
+        _ => anyhow::bail!("invalid --bounds '{spec}' (want west,south,east,north)"),
+    }
 }
 
 /// Install a `tracing` subscriber honouring `RUST_LOG` (defaults to `info`).

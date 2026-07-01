@@ -44,6 +44,9 @@ pub struct GenerateOptions {
     pub min_size_px: f64,
     /// Douglas–Peucker simplification tolerance in pixels (`0` disables it).
     pub simplify_tolerance_px: f64,
+    /// Only emit tiles intersecting these lon/lat bounds `(west, south, east,
+    /// north)`; `None` emits wherever features land.
+    pub bounds: Option<(f64, f64, f64, f64)>,
     /// Approximate RAM budget for the external sort before spilling to disk.
     pub sort_memory_bytes: usize,
     /// Archive `name` metadata.
@@ -62,6 +65,7 @@ impl Default for GenerateOptions {
             compression: TileCompression::Gzip,
             min_size_px: 1.0,
             simplify_tolerance_px: 0.0,
+            bounds: None,
             sort_memory_bytes: 64 << 20,
             name: None,
             layer_type: "overlay".to_owned(),
@@ -105,6 +109,7 @@ where
         buffer: options.buffer,
         min_size_px: options.min_size_px,
         simplify_tolerance_px: options.simplify_tolerance_px,
+        bounds: options.bounds,
     };
     const RENDER_BATCH: usize = 4096;
 

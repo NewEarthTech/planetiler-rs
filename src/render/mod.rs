@@ -44,6 +44,9 @@ pub struct RenderOptions {
     pub min_size_px: f64,
     /// Douglas–Peucker tolerance in pixels (`0` disables simplification).
     pub simplify_tolerance_px: f64,
+    /// Only emit tiles intersecting these lon/lat bounds `(west, south, east,
+    /// north)`; `None` emits wherever features land.
+    pub bounds: Option<(f64, f64, f64, f64)>,
 }
 
 /// Geometry reduced to a single kind, with Multi* flattened. Coordinates are in
@@ -114,10 +117,22 @@ fn render_at_zoom(
     let buffer = options.buffer;
     let max_tile = TileCoord::axis_tiles(z) - 1;
     let (min_x, min_y, max_x, max_y) = bounds(&geometry);
-    let tx0 = clamp_tile((min_x - buffer) / extent, max_tile);
-    let tx1 = clamp_tile((max_x + buffer) / extent, max_tile);
-    let ty0 = clamp_tile((min_y - buffer) / extent, max_tile);
-    let ty1 = clamp_tile((max_y + buffer) / extent, max_tile);
+    let mut tx0 = clamp_tile((min_x - buffer) / extent, max_tile);
+    let mut tx1 = clamp_tile((max_x + buffer) / extent, max_tile);
+    let mut ty0 = clamp_tile((min_y - buffer) / extent, max_tile);
+    let mut ty1 = clamp_tile((max_y + buffer) / extent, max_tile);
+
+    // Clip tile emission to the requested lon/lat bounds (e.g. the source bbox).
+    if let Some(clip) = options.bounds {
+        let (bx0, by0, bx1, by1) = bounds_tile_range(clip, n, max_tile);
+        tx0 = tx0.max(bx0);
+        tx1 = tx1.min(bx1);
+        ty0 = ty0.max(by0);
+        ty1 = ty1.min(by1);
+        if tx0 > tx1 || ty0 > ty1 {
+            return;
+        }
+    }
 
     let rect = Rect::new(-buffer, -buffer, extent + buffer, extent + buffer);
     for tx in tx0..=tx1 {
@@ -389,6 +404,20 @@ fn clamp_tile(fractional: f64, max_tile: u32) -> u32 {
     }
 }
 
+/// Tile range `(tx0, ty0, tx1, ty1)` covered by lon/lat `bounds` at a zoom with
+/// `n` tiles per axis.
+fn bounds_tile_range(bounds: (f64, f64, f64, f64), n: f64, max_tile: u32) -> (u32, u32, u32, u32) {
+    let (west, south, east, north) = bounds;
+    let (min_wx, min_wy) = lng_lat_to_world(west, north);
+    let (max_wx, max_wy) = lng_lat_to_world(east, south);
+    (
+        clamp_tile(min_wx * n, max_tile),
+        clamp_tile(min_wy * n, max_tile),
+        clamp_tile(max_wx * n, max_tile),
+        clamp_tile(max_wy * n, max_tile),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -412,6 +441,7 @@ mod tests {
             buffer: 0.0,
             min_size_px: 0.0,
             simplify_tolerance_px: 0.0,
+            bounds: None,
         }
     }
 
