@@ -49,6 +49,9 @@ pub struct GenerateOptions {
     pub bounds: Option<(f64, f64, f64, f64)>,
     /// Approximate RAM budget for the external sort before spilling to disk.
     pub sort_memory_bytes: usize,
+    /// Cap on features kept per tile layer (`0` = unlimited). Bounds memory for
+    /// low-zoom mega-tiles; excess features (in sort order) are dropped.
+    pub max_features_per_tile: usize,
     /// Archive `name` metadata.
     pub name: Option<String>,
     /// Archive `type` metadata (`baselayer` / `overlay`).
@@ -67,6 +70,7 @@ impl Default for GenerateOptions {
             simplify_tolerance_px: 0.0,
             bounds: None,
             sort_memory_bytes: 64 << 20,
+            max_features_per_tile: 0,
             name: None,
             layer_type: "overlay".to_owned(),
         }
@@ -143,6 +147,7 @@ where
         &registry,
         options.extent,
         options.compression,
+        options.max_features_per_tile,
         &mut writer,
     )?;
     writer.finish()?;
@@ -215,10 +220,12 @@ fn write_sorted_tiles(
     registry: &LayerRegistry,
     extent: u32,
     compression: TileCompression,
+    max_features_per_tile: usize,
     writer: &mut MbtilesWriter,
 ) -> Result<usize> {
     const WRITE_BATCH: usize = 256;
     let mut tiles_written = 0;
+    let mut dropped: u64 = 0;
     let mut current: Option<TileCoord> = None;
     let mut layers: BTreeMap<u8, Vec<mvt::Feature>> = BTreeMap::new();
     let mut batch: Vec<(TileCoord, mvt::Tile)> = Vec::new();
@@ -248,20 +255,33 @@ fn write_sorted_tiles(
             }
             current = Some(tile);
         }
+        // Cap features per tile-layer so a low-zoom mega-tile can't hold millions
+        // of decoded features in memory. Entries arrive in sort order, so this
+        // keeps the first `max_features_per_tile` deterministically and skips the
+        // rest (including their decode).
+        let layer_features = layers.entry(entry.key.layer()).or_default();
+        if max_features_per_tile != 0 && layer_features.len() >= max_features_per_tile {
+            dropped += 1;
+            continue;
+        }
         let blob = decode_blob(&entry.value)?;
-        layers
-            .entry(entry.key.layer())
-            .or_default()
-            .push(mvt::Feature {
-                id: blob.id,
-                geometry: blob.geometry,
-                attributes: blob.attrs,
-            });
+        layer_features.push(mvt::Feature {
+            id: blob.id,
+            geometry: blob.geometry,
+            attributes: blob.attrs,
+        });
     }
     if let Some(previous) = current.take() {
         batch.push(finalize(previous, &mut layers));
     }
     flush_batch(&mut batch, compression, writer, &mut tiles_written)?;
+    if dropped > 0 {
+        tracing::info!(
+            dropped,
+            max_features_per_tile,
+            "dropped features over per-tile cap"
+        );
+    }
     Ok(tiles_written)
 }
 
@@ -593,5 +613,51 @@ mod tests {
         let a = generate(&features, &profile, &big, dir.path().join("a.mbtiles")).unwrap();
         let b = generate(&features, &profile, &small, dir.path().join("b.mbtiles")).unwrap();
         assert_eq!(a, b, "spilling must not change tile output");
+    }
+
+    #[test]
+    fn caps_features_per_tile() {
+        // 100 points that all land in the single z0 tile; a cap of 10 must bound
+        // that tile's layer to 10 features.
+        let features: Vec<_> = (0..100)
+            .map(|i| {
+                let (lng, lat) = world_to_lng_lat(0.1 + i as f64 * 0.004, 0.5);
+                point(i, lng, lat, "p")
+            })
+            .collect();
+        let profile = PassthroughProfile::new("poi");
+        let dir = tempfile::tempdir().unwrap();
+
+        let count_poi = |max_features_per_tile: usize, file: &str| -> usize {
+            let options = GenerateOptions {
+                min_zoom: 0,
+                max_zoom: 0,
+                max_features_per_tile,
+                ..Default::default()
+            };
+            let path = dir.path().join(file);
+            generate(&features, &profile, &options, &path).unwrap();
+            let conn = Connection::open(&path).unwrap();
+            let blob: Vec<u8> = conn
+                .query_row("select tile_data from tiles limit 1", [], |r| r.get(0))
+                .unwrap();
+            let mut decoder = flate2::read::GzDecoder::new(blob.as_slice());
+            let mut raw = Vec::new();
+            std::io::Read::read_to_end(&mut decoder, &mut raw).unwrap();
+            let tile = decode_tile(&raw).unwrap();
+            tile.layers
+                .iter()
+                .find(|l| l.name == "poi")
+                .unwrap()
+                .features
+                .len()
+        };
+
+        assert_eq!(count_poi(0, "uncapped.mbtiles"), 100, "cap 0 keeps all");
+        assert_eq!(
+            count_poi(10, "capped.mbtiles"),
+            10,
+            "cap bounds the tile layer"
+        );
     }
 }

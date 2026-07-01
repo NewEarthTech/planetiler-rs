@@ -25,6 +25,8 @@ pub struct Cli {
 
 /// Top-level subcommands.
 #[derive(Debug, Subcommand)]
+// The CLI is parsed once; the size gap between `Generate` and `Version` is moot.
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Generate a tile archive from a GeoJSON source.
     Generate(GenerateArgs),
@@ -71,6 +73,10 @@ pub struct GenerateArgs {
     /// or `sparse` (off-heap, run-compressed — most compact, for planet scale).
     #[arg(long, default_value = "ram")]
     pub storage: String,
+    /// Max features kept per tile layer (0 = unlimited). Bounds memory for
+    /// low-zoom mega-tiles when rendering large areas at low zoom.
+    #[arg(long = "max-features-per-tile", default_value_t = 0)]
+    pub max_features_per_tile: usize,
     /// Archive `name` metadata.
     #[arg(long)]
     pub name: Option<String>,
@@ -145,6 +151,7 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
         simplify_tolerance_px: args.simplify,
         bounds,
         sort_memory_bytes: 256 << 20,
+        max_features_per_tile: args.max_features_per_tile,
         name: args.name,
         layer_type: "overlay".to_owned(),
     };
