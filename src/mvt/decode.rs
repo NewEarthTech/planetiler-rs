@@ -15,17 +15,19 @@ use super::proto::tile::GeomType;
 use crate::error::{Error, Result};
 use crate::model::Value;
 
-/// A decoded MVT tile: layers resolved into concrete geometry and attributes.
+/// A structured, in-memory MVT tile: layers resolved into concrete geometry and
+/// attributes. Produced by [`decode_tile`] and consumed by the encoder, so
+/// `encode` and `decode` share one representation.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DecodedTile {
+pub struct Tile {
     /// Layers in wire order (see [`semantically_equal`] for order-insensitive
     /// comparison).
-    pub layers: Vec<DecodedLayer>,
+    pub layers: Vec<Layer>,
 }
 
-/// A decoded MVT layer.
+/// A structured MVT layer.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DecodedLayer {
+pub struct Layer {
     /// Layer name.
     pub name: String,
     /// MVT version (2 for spec 2.1).
@@ -33,23 +35,24 @@ pub struct DecodedLayer {
     /// Tile extent (grid units per edge; default 4096).
     pub extent: u32,
     /// Features in wire order (draw order).
-    pub features: Vec<DecodedFeature>,
+    pub features: Vec<Feature>,
 }
 
-/// A decoded MVT feature.
+/// A structured MVT feature.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DecodedFeature {
+pub struct Feature {
     /// Feature id (0 if unset).
     pub id: u64,
     /// Geometry in tile coordinates.
-    pub geometry: DecodedGeometry,
-    /// Attributes, resolved from the layer dictionaries and keyed by name.
+    pub geometry: Geometry,
+    /// Attributes keyed by name. The `BTreeMap` keeps them sorted, which is also
+    /// the deterministic tag order the encoder emits.
     pub attributes: BTreeMap<String, Value>,
 }
 
-/// Decoded geometry, grouped by MVT geometry type.
+/// Structured MVT geometry, grouped by geometry type.
 #[derive(Debug, Clone, PartialEq)]
-pub enum DecodedGeometry {
+pub enum Geometry {
     /// One or more points.
     Points(Vec<(i32, i32)>),
     /// One or more line strings.
@@ -60,27 +63,27 @@ pub enum DecodedGeometry {
     Unknown,
 }
 
-/// Decode raw (already-decompressed) MVT protobuf bytes into a [`DecodedTile`].
+/// Decode raw (already-decompressed) MVT protobuf bytes into a [`Tile`].
 ///
 /// # Errors
 /// Returns [`Error::MvtDecode`] on protobuf-level failures or malformed tags,
 /// and [`Error::MvtGeometry`] on malformed geometry command streams.
-pub fn decode_tile(bytes: &[u8]) -> Result<DecodedTile> {
+pub fn decode_tile(bytes: &[u8]) -> Result<Tile> {
     let tile =
         proto::Tile::decode(bytes).map_err(|_| Error::MvtDecode("protobuf decode failed"))?;
     let mut layers = Vec::with_capacity(tile.layers.len());
     for layer in &tile.layers {
         layers.push(decode_layer(layer)?);
     }
-    Ok(DecodedTile { layers })
+    Ok(Tile { layers })
 }
 
-fn decode_layer(layer: &proto::tile::Layer) -> Result<DecodedLayer> {
+fn decode_layer(layer: &proto::tile::Layer) -> Result<Layer> {
     let mut features = Vec::with_capacity(layer.features.len());
     for feature in &layer.features {
         features.push(decode_feature(feature, layer)?);
     }
-    Ok(DecodedLayer {
+    Ok(Layer {
         name: layer.name.clone(),
         version: layer.version,
         extent: layer.extent.unwrap_or(4096),
@@ -88,10 +91,7 @@ fn decode_layer(layer: &proto::tile::Layer) -> Result<DecodedLayer> {
     })
 }
 
-fn decode_feature(
-    feature: &proto::tile::Feature,
-    layer: &proto::tile::Layer,
-) -> Result<DecodedFeature> {
+fn decode_feature(feature: &proto::tile::Feature, layer: &proto::tile::Layer) -> Result<Feature> {
     if !feature.tags.len().is_multiple_of(2) {
         return Err(Error::MvtDecode("odd number of feature tags"));
     }
@@ -110,13 +110,13 @@ fn decode_feature(
 
     let geom_type = GeomType::try_from(feature.r#type.unwrap_or(0)).unwrap_or(GeomType::Unknown);
     let geometry = match geom_type {
-        GeomType::Point => DecodedGeometry::Points(decode_points(&feature.geometry)?),
-        GeomType::Linestring => DecodedGeometry::Lines(decode_lines(&feature.geometry)?),
-        GeomType::Polygon => DecodedGeometry::Polygons(decode_polygons(&feature.geometry)?),
-        GeomType::Unknown => DecodedGeometry::Unknown,
+        GeomType::Point => Geometry::Points(decode_points(&feature.geometry)?),
+        GeomType::Linestring => Geometry::Lines(decode_lines(&feature.geometry)?),
+        GeomType::Polygon => Geometry::Polygons(decode_polygons(&feature.geometry)?),
+        GeomType::Unknown => Geometry::Unknown,
     };
 
-    Ok(DecodedFeature {
+    Ok(Feature {
         id: feature.id.unwrap_or(0),
         geometry,
         attributes,
@@ -156,12 +156,12 @@ fn decode_value(value: &proto::tile::Value) -> Result<Value> {
 /// check for parity against upstream, given that byte-identical output is
 /// blocked by gzip and Java `HashMap` tag ordering (see the Phase 1 parity
 /// notes).
-pub fn semantically_equal(a: &DecodedTile, b: &DecodedTile) -> bool {
+pub fn semantically_equal(a: &Tile, b: &Tile) -> bool {
     if a.layers.len() != b.layers.len() {
         return false;
     }
-    let mut a_layers: Vec<&DecodedLayer> = a.layers.iter().collect();
-    let mut b_layers: Vec<&DecodedLayer> = b.layers.iter().collect();
+    let mut a_layers: Vec<&Layer> = a.layers.iter().collect();
+    let mut b_layers: Vec<&Layer> = b.layers.iter().collect();
     a_layers.sort_by(|l, r| l.name.cmp(&r.name));
     b_layers.sort_by(|l, r| l.name.cmp(&r.name));
     a_layers == b_layers
@@ -218,10 +218,7 @@ mod tests {
 
         let f = &layer.features[0];
         assert_eq!(f.id, 1);
-        assert_eq!(
-            f.geometry,
-            DecodedGeometry::Lines(vec![vec![(0, 0), (10, 10)]])
-        );
+        assert_eq!(f.geometry, Geometry::Lines(vec![vec![(0, 0), (10, 10)]]));
         assert_eq!(
             f.attributes.get("name"),
             Some(&Value::String("Main".into()))
@@ -267,7 +264,7 @@ mod tests {
         };
         let roads = roads_layer(vec!["name"], vec![sval("Main")], vec![0, 0]);
 
-        let ab = DecodedTile {
+        let ab = Tile {
             layers: decode_tile(
                 &proto::Tile {
                     layers: vec![roads.clone(), water.clone()],
@@ -277,7 +274,7 @@ mod tests {
             .unwrap()
             .layers,
         };
-        let ba = DecodedTile {
+        let ba = Tile {
             layers: decode_tile(
                 &proto::Tile {
                     layers: vec![water, roads],

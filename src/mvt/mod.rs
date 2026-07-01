@@ -8,11 +8,11 @@
 //! parity (built out as the encoder lands).
 
 pub mod decode;
+pub mod encode;
 pub mod geometry;
 
-pub use decode::{
-    DecodedFeature, DecodedGeometry, DecodedLayer, DecodedTile, decode_tile, semantically_equal,
-};
+pub use decode::{Feature, Geometry, Layer, Tile, decode_tile, semantically_equal};
+pub use encode::encode_tile;
 
 /// Generated protobuf wire types for the MVT format (Mapbox spec 2.1),
 /// compiled from `proto/vector_tile.proto`.
