@@ -34,6 +34,19 @@ Pushing to country scale answered "is the node-store work worth it?" — and fou
 - **A per-tile-layer cap fixes it**: `--max-features-per-tile 50000` cut GB z0-6 from **59.3 → 5.9 GB (10×)** and ran ~2× faster (dropped features are skipped before decode). Output at realistic osm-qa zooms (z12-14) is unaffected — no low-zoom tiles, and the default is unlimited.
 - **At realistic zoom the node store *does* pay off**: GB z12 is 5.6 GB (ram) vs 4.5 GB (sparse) — sparse saves ~1.15 GB (20%), matching the node-store delta (240 M × 16 B = 3.84 GB vs sparse ~2.7 GB). The margin grows with scale (rhode-island ~85 MB → GB ~1.15 GB), trending to planet where ram's ~144 GB store is impossible.
 
+### great-britain z12 head-to-head vs Planetiler (osm-qa)
+
+| tool | wall | peak RSS | tiles |
+|---|---|---|---|
+| planetiler-rs (sparse) | 332 s | **4.3 GB** | 21472 |
+| Planetiler osm-qa | **81 s** | 29.1 GB | 21340 |
+
+Near-identical output (21472 vs 21340 tiles, 0.6%). The honest verdict at country scale is **mixed**:
+- **Memory: ~6.7× less** (4.3 GB vs 29 GB). This is the architectural / OOM thesis and it holds decisively — we build great-britain in 4 GB where the JVM grabs 29. Part of the story is a deliberate *tradeoff*: Planetiler keeps the node map and features in RAM (fast, huge); we spill the sort to disk and mmap the node store (small, slower).
+- **Time: ~4× slower** (332 s vs 81 s). This inverts the rhode-island result, where JVM cold-start masked Java's throughput. At scale, Planetiler's mature, heavily-parallel pipeline out-throughputs the young Rust port. The ram node store doesn't close it (ram z12 ≈ 324 s too), so the gap is in read/render/sort/encode throughput, not node-store I/O — i.e. optimization headroom, not an architectural wall.
+
+**So the "beats it on time *and* memory" bar is half-met at country scale: memory yes, time no (yet).**
+
 ## Output parity (monaco, z12-14, via `bench compare`)
 
 Measured with the parity oracle (`bench compare ours.mbtiles java.mbtiles`), which decodes both archives and reports tile-set overlap + per-tile semantic equality. Progress from the initial "wildly different" state:
