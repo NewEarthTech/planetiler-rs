@@ -26,6 +26,7 @@ pub mod archive;
 pub mod cli;
 pub mod collection;
 pub mod mvt;
+pub mod pipeline;
 pub mod profile;
 pub mod render;
 pub mod source;
