@@ -12,6 +12,8 @@ use crate::source::SourceFeature;
 /// renderer (not the profile) projects this into tile space.
 #[derive(Debug, Clone)]
 pub struct VectorFeature {
+    /// Feature id (carried to the MVT feature); defaults to the source id.
+    pub id: u64,
     /// Target MVT layer name.
     pub layer: String,
     /// Geometry in lon/lat (WGS84).
@@ -27,8 +29,9 @@ pub struct VectorFeature {
 }
 
 impl VectorFeature {
-    fn new(layer: &str, geometry: Geometry<f64>, min_zoom: u8, max_zoom: u8) -> Self {
+    fn new(id: u64, layer: &str, geometry: Geometry<f64>, min_zoom: u8, max_zoom: u8) -> Self {
         Self {
+            id,
             layer: layer.to_owned(),
             geometry,
             attrs: BTreeMap::new(),
@@ -94,6 +97,7 @@ impl<'a> FeatureCollector<'a> {
     /// attributes. Returns a handle for further configuration.
     pub fn add(&mut self, layer: &str) -> &mut VectorFeature {
         self.features.push(VectorFeature::new(
+            self.source.id,
             layer,
             self.source.geometry.clone(),
             self.default_min_zoom,
@@ -106,6 +110,7 @@ impl<'a> FeatureCollector<'a> {
     /// of the source's tags (the passthrough behaviour).
     pub fn add_all_tags(&mut self, layer: &str) -> &mut VectorFeature {
         let mut feature = VectorFeature::new(
+            self.source.id,
             layer,
             self.source.geometry.clone(),
             self.default_min_zoom,
