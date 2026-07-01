@@ -1,12 +1,14 @@
-//! In-memory generation pipeline (Phase 2).
+//! Generation pipeline (Phase 3: external-sort streaming).
 //!
 //! Ties the stages together: read source features, run them through a
 //! [`Profile`] into a [`FeatureCollector`], render each emitted feature into
-//! tiles, then encode and write the tiles plus computed metadata to an
-//! [`MbtilesWriter`]. The external-sort / worker-parallel path replaces the
-//! in-memory grouping in Phase 3.
+//! per-tile pieces, serialize each piece into a [`model::Entry`](crate::model)
+//! keyed by its sort key, and feed them to an [`ExternalMergeSort`]. Then stream
+//! the sorted entries, grouping consecutive same-tile records, and encode + write
+//! each tile to an [`MbtilesWriter`]. Memory is bounded by the sort buffer plus
+//! one tile's features (the worker-parallel path comes next).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use geo_types::Geometry;
@@ -14,11 +16,13 @@ use geo_types::Geometry;
 use crate::archive::{
     FieldType, MbtilesWriter, TileArchive, TileArchiveMetadata, TileCompression, VectorLayer,
 };
-use crate::error::Result;
-use crate::model::Value;
-use crate::mvt::encode_tile;
+use crate::collection::ExternalMergeSort;
+use crate::error::{Error, Result};
+use crate::geom::TileCoord;
+use crate::model::{Entry, MAX_LAYER, SortKey, Value};
+use crate::mvt::{self, encode_tile};
 use crate::profile::{FeatureCollector, Profile, VectorFeature};
-use crate::render::TileAccumulator;
+use crate::render::render_feature;
 use crate::source::SourceFeature;
 
 /// Generation options (a subset of the eventual CLI surface).
@@ -34,6 +38,8 @@ pub struct GenerateOptions {
     pub buffer: f64,
     /// Per-tile compression.
     pub compression: TileCompression,
+    /// Approximate RAM budget for the external sort before spilling to disk.
+    pub sort_memory_bytes: usize,
     /// Archive `name` metadata.
     pub name: Option<String>,
     /// Archive `type` metadata (`baselayer` / `overlay`).
@@ -48,6 +54,7 @@ impl Default for GenerateOptions {
             extent: 4096,
             buffer: 64.0,
             compression: TileCompression::Gzip,
+            sort_memory_bytes: 64 << 20,
             name: None,
             layer_type: "overlay".to_owned(),
         }
@@ -63,19 +70,15 @@ pub struct GenerateStats {
     pub tiles: usize,
 }
 
-/// Run the pipeline: source features → profile → render → MBTiles at `output`.
+/// Run the pipeline: source features → profile → render → external sort → MBTiles.
 pub fn generate(
     features: &[SourceFeature],
     profile: &dyn Profile,
     options: &GenerateOptions,
     output: impl AsRef<Path>,
 ) -> Result<GenerateStats> {
-    let mut accumulator = TileAccumulator::new(
-        options.min_zoom,
-        options.max_zoom,
-        options.extent,
-        options.buffer,
-    );
+    let mut sort = ExternalMergeSort::new(options.sort_memory_bytes)?;
+    let mut registry = LayerRegistry::default();
     let mut layer_stats: BTreeMap<String, LayerStat> = BTreeMap::new();
     let mut bounds = Bounds::default();
 
@@ -85,24 +88,134 @@ pub fn generate(
         profile.process_feature(source, &mut collector);
         for feature in collector.into_features() {
             record_layer_stats(&mut layer_stats, &feature, options);
-            accumulator.add(&feature);
+            for rendered in render_feature(
+                &feature,
+                options.min_zoom,
+                options.max_zoom,
+                options.extent,
+                options.buffer,
+            ) {
+                let layer = registry.intern(&rendered.layer)?;
+                let key = SortKey::new(rendered.coord, layer, rendered.zorder)?;
+                let blob = encode_blob(&FeatureBlob {
+                    id: rendered.id,
+                    geometry: rendered.geometry,
+                    attrs: rendered.attrs,
+                })?;
+                sort.add(Entry::new(key, blob))?;
+            }
         }
     }
 
-    let tiles = accumulator.into_tiles();
     let metadata = build_metadata(&layer_stats, &bounds, options, profile);
-
     let mut writer = MbtilesWriter::create(output, options.compression)?;
     writer.write_metadata(&metadata)?;
-    for (coord, tile) in &tiles {
-        writer.write_tile(*coord, &encode_tile(tile))?;
-    }
+    let tiles = write_sorted_tiles(sort, &registry, options.extent, &mut writer)?;
     writer.finish()?;
 
     Ok(GenerateStats {
         features: features.len(),
-        tiles: tiles.len(),
+        tiles,
     })
+}
+
+/// Stream the sorted entries, group consecutive same-tile records, and write.
+fn write_sorted_tiles(
+    sort: ExternalMergeSort,
+    registry: &LayerRegistry,
+    extent: u32,
+    writer: &mut MbtilesWriter,
+) -> Result<usize> {
+    let mut tiles_written = 0;
+    let mut current: Option<TileCoord> = None;
+    let mut layers: BTreeMap<u8, Vec<mvt::Feature>> = BTreeMap::new();
+
+    for entry in sort.into_sorted()? {
+        let entry = entry?;
+        let tile = entry.key.tile();
+        if current != Some(tile) {
+            if let Some(previous) = current.take() {
+                flush_tile(previous, &mut layers, registry, extent, writer)?;
+                tiles_written += 1;
+            }
+            current = Some(tile);
+        }
+        let blob = decode_blob(&entry.value)?;
+        layers
+            .entry(entry.key.layer())
+            .or_default()
+            .push(mvt::Feature {
+                id: blob.id,
+                geometry: blob.geometry,
+                attributes: blob.attrs,
+            });
+    }
+    if let Some(previous) = current.take() {
+        flush_tile(previous, &mut layers, registry, extent, writer)?;
+        tiles_written += 1;
+    }
+    Ok(tiles_written)
+}
+
+fn flush_tile(
+    coord: TileCoord,
+    layers: &mut BTreeMap<u8, Vec<mvt::Feature>>,
+    registry: &LayerRegistry,
+    extent: u32,
+    writer: &mut MbtilesWriter,
+) -> Result<()> {
+    let mvt_layers = std::mem::take(layers)
+        .into_iter()
+        .map(|(index, features)| mvt::Layer {
+            name: registry.name(index).to_owned(),
+            version: 2,
+            extent,
+            features,
+        })
+        .collect();
+    writer.write_tile(coord, &encode_tile(&mvt::Tile { layers: mvt_layers }))
+}
+
+/// The opaque per-feature payload sorted alongside the sort key.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FeatureBlob {
+    id: u64,
+    geometry: mvt::Geometry,
+    attrs: BTreeMap<String, Value>,
+}
+
+fn encode_blob(blob: &FeatureBlob) -> Result<Vec<u8>> {
+    postcard::to_allocvec(blob).map_err(|_| Error::Codec("feature blob encode failed"))
+}
+
+fn decode_blob(bytes: &[u8]) -> Result<FeatureBlob> {
+    postcard::from_bytes(bytes).map_err(|_| Error::Codec("feature blob decode failed"))
+}
+
+/// Interns layer names to the small indices packed into the sort key.
+#[derive(Default)]
+struct LayerRegistry {
+    names: Vec<String>,
+    index: HashMap<String, u8>,
+}
+
+impl LayerRegistry {
+    fn intern(&mut self, name: &str) -> Result<u8> {
+        if let Some(&i) = self.index.get(name) {
+            return Ok(i);
+        }
+        let i = u8::try_from(self.names.len())
+            .ok()
+            .filter(|&i| i <= MAX_LAYER)
+            .ok_or(Error::Config("too many layers (max 64)"))?;
+        self.names.push(name.to_owned());
+        self.index.insert(name.to_owned(), i);
+        Ok(i)
+    }
+
+    fn name(&self, index: u8) -> &str {
+        &self.names[index as usize]
+    }
 }
 
 /// Accumulated tilejson stats for one layer.
@@ -341,5 +454,33 @@ mod tests {
         std::io::Read::read_to_end(&mut decoder, &mut raw).unwrap();
         let tile = decode_tile(&raw).unwrap();
         assert!(tile.layers.iter().any(|l| l.name == "poi"));
+    }
+
+    #[test]
+    fn spilling_sort_produces_same_output_as_in_memory() {
+        // Distinct tiles so counts are deterministic; a tiny sort budget forces
+        // disk spills, which must not change the result.
+        let features: Vec<_> = (0..200)
+            .map(|i| {
+                let (lng, lat) = world_to_lng_lat(0.01 + i as f64 * 0.004, 0.5);
+                point(i, lng, lat, "p")
+            })
+            .collect();
+        let profile = PassthroughProfile::new("poi");
+        let dir = tempfile::tempdir().unwrap();
+
+        let big = GenerateOptions {
+            min_zoom: 0,
+            max_zoom: 10,
+            ..Default::default()
+        };
+        let small = GenerateOptions {
+            sort_memory_bytes: 256,
+            ..big.clone()
+        };
+
+        let a = generate(&features, &profile, &big, dir.path().join("a.mbtiles")).unwrap();
+        let b = generate(&features, &profile, &small, dir.path().join("b.mbtiles")).unwrap();
+        assert_eq!(a, b, "spilling must not change tile output");
     }
 }

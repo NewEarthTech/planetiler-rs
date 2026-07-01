@@ -38,6 +38,10 @@ pub enum Error {
     #[error("source error: {0}")]
     Source(&'static str),
 
+    /// A feature blob could not be (de)serialized for the external sort.
+    #[error("feature codec error: {0}")]
+    Codec(&'static str),
+
     /// I/O failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),

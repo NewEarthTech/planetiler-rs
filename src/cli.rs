@@ -110,6 +110,7 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
         extent: 4096,
         buffer: args.buffer,
         compression,
+        sort_memory_bytes: 256 << 20,
         name: args.name,
         layer_type: "overlay".to_owned(),
     };

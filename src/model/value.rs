@@ -9,7 +9,7 @@
 /// parity with upstream. Because floats are not `Eq`/`Hash`, the encoder's
 /// value-dedup table (Phase 1) hashes by bit pattern rather than deriving those
 /// traits here.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     /// UTF-8 string.
     String(String),

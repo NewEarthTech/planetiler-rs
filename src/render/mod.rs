@@ -3,12 +3,14 @@
 //! Projects a profile's lon/lat [`VectorFeature`] into web-mercator world space,
 //! then for each zoom in its range slices it into every covering tile: transform
 //! to tile-local extent coordinates, clip to the tile-plus-buffer rectangle,
-//! quantize to the integer grid, fix polygon winding, and accumulate per-tile
-//! MVT features. This is the hardest correctness code in the pipeline.
+//! quantize to the integer grid, fix polygon winding, and emit one
+//! [`RenderedFeature`] per covering tile. This is the hardest correctness code
+//! in the pipeline.
 //!
-//! Phase 2 renders in memory (no external sort yet) and does not simplify;
-//! zoom-dependent simplification and the `model::Entry`/external-sort path come
-//! next.
+//! Rendering emits per-feature (bounded by that feature's tile span) rather than
+//! accumulating every tile in memory; the pipeline serializes each emitted
+//! feature into a `model::Entry` and sorts them externally. Zoom-dependent
+//! simplification and min-size filtering are still to come.
 
 mod clip;
 
@@ -17,6 +19,7 @@ use std::collections::BTreeMap;
 use geo_types::{Coord, Geometry, LineString, Polygon};
 
 use crate::geom::{TileCoord, lng_lat_to_world};
+use crate::model::Value;
 use crate::mvt;
 use crate::profile::VectorFeature;
 use clip::Rect;
@@ -31,102 +34,81 @@ enum RenderGeometry {
     Polygons(Vec<Vec<Vec<(f64, f64)>>>),
 }
 
-/// Accumulates rendered MVT features grouped by tile, then layer.
-pub struct TileAccumulator {
+/// One feature rendered into a single tile — everything the pipeline needs to
+/// build a sort key and serialize the feature blob.
+#[derive(Debug, Clone)]
+pub struct RenderedFeature {
+    /// Target tile.
+    pub coord: TileCoord,
+    /// MVT layer name.
+    pub layer: String,
+    /// Draw order within the tile+layer.
+    pub zorder: i32,
+    /// Feature id.
+    pub id: u64,
+    /// Tile-space geometry.
+    pub geometry: mvt::Geometry,
+    /// Feature attributes.
+    pub attrs: BTreeMap<String, Value>,
+}
+
+/// Render one vector feature into every covering tile across its zoom range
+/// (intersected with `[min_zoom, max_zoom]`), returning one
+/// [`RenderedFeature`] per covering tile.
+pub fn render_feature(
+    feature: &VectorFeature,
     min_zoom: u8,
     max_zoom: u8,
     extent: u32,
     buffer: f64,
-    tiles: BTreeMap<TileCoord, BTreeMap<String, Vec<(i32, mvt::Feature)>>>,
+) -> Vec<RenderedFeature> {
+    let mut out = Vec::new();
+    let Some(geometry) = extract(&feature.geometry) else {
+        return out;
+    };
+    let min_z = feature.min_zoom.max(min_zoom);
+    let max_z = feature.max_zoom.min(max_zoom);
+    for z in min_z..=max_z {
+        render_at_zoom(feature, &geometry, z, extent, buffer, &mut out);
+    }
+    out
 }
 
-impl TileAccumulator {
-    /// Create an accumulator for the given global zoom range, tile extent, and
-    /// buffer (in extent units).
-    pub fn new(min_zoom: u8, max_zoom: u8, extent: u32, buffer: f64) -> Self {
-        Self {
-            min_zoom,
-            max_zoom,
-            extent,
-            buffer,
-            tiles: BTreeMap::new(),
+fn render_at_zoom(
+    feature: &VectorFeature,
+    geometry: &RenderGeometry,
+    z: u8,
+    extent_units: u32,
+    buffer: f64,
+    out: &mut Vec<RenderedFeature>,
+) {
+    let n = f64::from(TileCoord::axis_tiles(z));
+    let extent = f64::from(extent_units);
+    let buffer_frac = buffer / extent;
+    let max_tile = TileCoord::axis_tiles(z) - 1;
+
+    let (min_fx, min_fy, max_fx, max_fy) = bbox_tile_fractional(geometry, n);
+    let tx0 = clamp_tile(min_fx - buffer_frac, max_tile);
+    let tx1 = clamp_tile(max_fx + buffer_frac, max_tile);
+    let ty0 = clamp_tile(min_fy - buffer_frac, max_tile);
+    let ty1 = clamp_tile(max_fy + buffer_frac, max_tile);
+
+    let rect = Rect::new(-buffer, -buffer, extent + buffer, extent + buffer);
+
+    for tx in tx0..=tx1 {
+        for ty in ty0..=ty1 {
+            let Some(geometry) = clip_to_tile(geometry, n, tx, ty, extent, &rect) else {
+                continue;
+            };
+            out.push(RenderedFeature {
+                coord: TileCoord::new(z, tx, ty).expect("tile in range"),
+                layer: feature.layer.clone(),
+                zorder: feature.zorder,
+                id: feature.id,
+                geometry,
+                attrs: feature.attrs.clone(),
+            });
         }
-    }
-
-    /// Render one vector feature into all covering tiles across its zoom range.
-    pub fn add(&mut self, feature: &VectorFeature) {
-        let Some(geometry) = extract(&feature.geometry) else {
-            return;
-        };
-        let min_z = feature.min_zoom.max(self.min_zoom);
-        let max_z = feature.max_zoom.min(self.max_zoom);
-        for z in min_z..=max_z {
-            self.add_at_zoom(feature, &geometry, z);
-        }
-    }
-
-    fn add_at_zoom(&mut self, feature: &VectorFeature, geometry: &RenderGeometry, z: u8) {
-        let n = f64::from(TileCoord::axis_tiles(z));
-        let extent = f64::from(self.extent);
-        let buffer_frac = self.buffer / extent;
-        let max_tile = TileCoord::axis_tiles(z) - 1;
-
-        let (min_fx, min_fy, max_fx, max_fy) = bbox_tile_fractional(geometry, n);
-        let tx0 = clamp_tile(min_fx - buffer_frac, max_tile);
-        let tx1 = clamp_tile(max_fx + buffer_frac, max_tile);
-        let ty0 = clamp_tile(min_fy - buffer_frac, max_tile);
-        let ty1 = clamp_tile(max_fy + buffer_frac, max_tile);
-
-        let rect = Rect::new(
-            -self.buffer,
-            -self.buffer,
-            extent + self.buffer,
-            extent + self.buffer,
-        );
-
-        for tx in tx0..=tx1 {
-            for ty in ty0..=ty1 {
-                let Some(mvt_geometry) = clip_to_tile(geometry, n, tx, ty, extent, &rect) else {
-                    continue;
-                };
-                let coord = TileCoord::new(z, tx, ty).expect("tile in range");
-                let mvt_feature = mvt::Feature {
-                    id: feature.id,
-                    geometry: mvt_geometry,
-                    attributes: feature.attrs.clone(),
-                };
-                self.tiles
-                    .entry(coord)
-                    .or_default()
-                    .entry(feature.layer.clone())
-                    .or_default()
-                    .push((feature.zorder, mvt_feature));
-            }
-        }
-    }
-
-    /// Consume the accumulator, yielding each non-empty tile as an [`mvt::Tile`],
-    /// features ordered by z-order within each layer.
-    pub fn into_tiles(self) -> Vec<(TileCoord, mvt::Tile)> {
-        let TileAccumulator { extent, tiles, .. } = self;
-        tiles
-            .into_iter()
-            .map(|(coord, layers)| {
-                let mvt_layers = layers
-                    .into_iter()
-                    .map(|(name, mut features)| {
-                        features.sort_by_key(|(zorder, _)| *zorder);
-                        mvt::Layer {
-                            name,
-                            version: 2,
-                            extent,
-                            features: features.into_iter().map(|(_, f)| f).collect(),
-                        }
-                    })
-                    .collect();
-                (coord, mvt::Tile { layers: mvt_layers })
-            })
-            .collect()
     }
 }
 
@@ -345,13 +327,10 @@ mod tests {
     fn point_lands_in_one_tile_inside_extent() {
         let (lng, lat) = ll(0.3, 0.3);
         let f = feature(Geometry::Point(Point::new(lng, lat)), 3, 3);
-        let mut acc = TileAccumulator::new(0, 14, 4096, 0.0);
-        acc.add(&f);
-        let tiles = acc.into_tiles();
-        assert_eq!(tiles.len(), 1);
-        let (coord, tile) = &tiles[0];
-        assert_eq!(coord.z(), 3);
-        match &tile.layers[0].features[0].geometry {
+        let rendered = render_feature(&f, 0, 14, 4096, 0.0);
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0].coord.z(), 3);
+        match &rendered[0].geometry {
             mvt::Geometry::Points(p) => {
                 assert_eq!(p.len(), 1);
                 assert!((0..=4096).contains(&p[0].0) && (0..=4096).contains(&p[0].1));
@@ -362,36 +341,19 @@ mod tests {
 
     #[test]
     fn line_crossing_boundary_is_sliced_into_two_tiles() {
-        // Horizontal line spanning the x-boundary at z1 (world x 0.3 -> 0.7,
-        // y 0.25 well inside the top tiles), buffer 0 for a clean count.
         let a = ll(0.3, 0.25);
         let b = ll(0.7, 0.25);
         let line = LineString(vec![coord! {x: a.0, y: a.1}, coord! {x: b.0, y: b.1}]);
         let f = feature(Geometry::LineString(line), 1, 1);
-        let mut acc = TileAccumulator::new(0, 14, 4096, 0.0);
-        acc.add(&f);
-        let tiles = acc.into_tiles();
-
-        assert_eq!(
-            tiles.len(),
-            2,
-            "line spans two tiles: {:?}",
-            tiles
-                .iter()
-                .map(|(c, _)| (c.x(), c.y()))
-                .collect::<Vec<_>>()
-        );
-        for (_, tile) in &tiles {
-            assert!(matches!(
-                tile.layers[0].features[0].geometry,
-                mvt::Geometry::Lines(_)
-            ));
+        let rendered = render_feature(&f, 0, 14, 4096, 0.0);
+        assert_eq!(rendered.len(), 2, "line spans two tiles");
+        for r in &rendered {
+            assert!(matches!(r.geometry, mvt::Geometry::Lines(_)));
         }
     }
 
     #[test]
     fn polygon_spanning_four_tiles_is_clipped_into_each() {
-        // A square around the z1 center (world 0.5,0.5) covering all four tiles.
         let corners = [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)];
         let ring: Vec<_> = corners
             .iter()
@@ -405,16 +367,12 @@ mod tests {
             1,
             1,
         );
-        let mut acc = TileAccumulator::new(0, 14, 4096, 0.0);
-        acc.add(&f);
-        let tiles = acc.into_tiles();
-
-        assert_eq!(tiles.len(), 4, "polygon covers all four z1 tiles");
-        for (_, tile) in &tiles {
-            match &tile.layers[0].features[0].geometry {
+        let rendered = render_feature(&f, 0, 14, 4096, 0.0);
+        assert_eq!(rendered.len(), 4, "polygon covers all four z1 tiles");
+        for r in &rendered {
+            match &r.geometry {
                 mvt::Geometry::Polygons(rings) => {
                     assert!(!rings.is_empty());
-                    // Exterior ring must have positive (clockwise, Y-down) area.
                     assert!(signed_area2(&rings[0]) > 0, "exterior winding");
                 }
                 other => panic!("expected polygons, got {other:?}"),
@@ -426,9 +384,11 @@ mod tests {
     fn zoom_range_is_intersected_with_global() {
         let (lng, lat) = ll(0.3, 0.3);
         let f = feature(Geometry::Point(Point::new(lng, lat)), 2, 5);
-        let mut acc = TileAccumulator::new(3, 4, 4096, 0.0); // global 3..=4
-        acc.add(&f);
-        let zooms: Vec<u8> = acc.into_tiles().iter().map(|(c, _)| c.z()).collect();
+        let mut zooms: Vec<u8> = render_feature(&f, 3, 4, 4096, 0.0)
+            .iter()
+            .map(|r| r.coord.z())
+            .collect();
+        zooms.sort_unstable();
         assert_eq!(zooms, vec![3, 4]);
     }
 }

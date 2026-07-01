@@ -51,7 +51,7 @@ pub struct Feature {
 }
 
 /// Structured MVT geometry, grouped by geometry type.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Geometry {
     /// One or more points.
     Points(Vec<(i32, i32)>),
