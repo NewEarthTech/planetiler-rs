@@ -99,6 +99,125 @@ pub fn parse_peak_rss_bytes(report: &str) -> Option<u64> {
     None
 }
 
+/// A semantic parity report between two tile archives (e.g. ours vs upstream).
+#[derive(Debug, Default)]
+pub struct ArchiveComparison {
+    /// Tiles present only in the first archive.
+    pub only_a: usize,
+    /// Tiles present only in the second archive.
+    pub only_b: usize,
+    /// Tiles present in both archives.
+    pub shared: usize,
+    /// Shared tiles that are semantically identical (decode-equal).
+    pub identical: usize,
+    /// Shared tiles that differ.
+    pub differing: usize,
+    /// Total decoded features in the first archive.
+    pub features_a: usize,
+    /// Total decoded features in the second archive.
+    pub features_b: usize,
+    /// Layer names seen in the first archive.
+    pub layers_a: std::collections::BTreeSet<String>,
+    /// Layer names seen in the second archive.
+    pub layers_b: std::collections::BTreeSet<String>,
+}
+
+impl std::fmt::Display for ArchiveComparison {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "tiles:   shared={} only_a={} only_b={}",
+            self.shared, self.only_a, self.only_b
+        )?;
+        writeln!(
+            f,
+            "shared:  identical={} differing={}",
+            self.identical, self.differing
+        )?;
+        writeln!(f, "features: a={} b={}", self.features_a, self.features_b)?;
+        writeln!(f, "layers_a ({}): {:?}", self.layers_a.len(), self.layers_a)?;
+        write!(f, "layers_b ({}): {:?}", self.layers_b.len(), self.layers_b)
+    }
+}
+
+/// Compare two MBTiles archives semantically: decode every tile in each and
+/// report tile-set overlap, per-tile decode-equality, and feature/layer totals.
+/// This is the parity oracle — time and memory only matter once output matches.
+pub fn compare_archives(
+    a: &std::path::Path,
+    b: &std::path::Path,
+) -> anyhow::Result<ArchiveComparison> {
+    let tiles_a = read_archive(a)?;
+    let tiles_b = read_archive(b)?;
+    let mut report = ArchiveComparison::default();
+
+    for (coord, tile) in &tiles_a {
+        report.features_a += tile.layers.iter().map(|l| l.features.len()).sum::<usize>();
+        report
+            .layers_a
+            .extend(tile.layers.iter().map(|l| l.name.clone()));
+        match tiles_b.get(coord) {
+            None => report.only_a += 1,
+            Some(other) => {
+                report.shared += 1;
+                if crate::mvt::semantically_equal(tile, other) {
+                    report.identical += 1;
+                } else {
+                    report.differing += 1;
+                }
+            }
+        }
+    }
+    for (coord, tile) in &tiles_b {
+        report.features_b += tile.layers.iter().map(|l| l.features.len()).sum::<usize>();
+        report
+            .layers_b
+            .extend(tile.layers.iter().map(|l| l.name.clone()));
+        if !tiles_a.contains_key(coord) {
+            report.only_b += 1;
+        }
+    }
+    Ok(report)
+}
+
+/// Read an MBTiles archive into decoded tiles (handles the compact `tiles` view,
+/// the TMS→XYZ flip, and gzip). Loads everything into memory — fine at
+/// city/region scale.
+fn read_archive(
+    path: &std::path::Path,
+) -> anyhow::Result<std::collections::BTreeMap<crate::geom::TileCoord, crate::mvt::Tile>> {
+    use std::io::Read;
+    let conn = rusqlite::Connection::open(path)?;
+    let mut stmt =
+        conn.prepare("SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, u8>(0)?,
+            r.get::<_, u32>(1)?,
+            r.get::<_, u32>(2)?,
+            r.get::<_, Vec<u8>>(3)?,
+        ))
+    })?;
+
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+        let (z, x, tms_y, blob) = row?;
+        let y = (1u32 << z) - 1 - tms_y; // TMS → XYZ
+        let coord = crate::geom::TileCoord::new(z, x, y).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let raw = if blob.starts_with(&[0x1f, 0x8b]) {
+            let mut decoder = flate2::read::GzDecoder::new(blob.as_slice());
+            let mut buf = Vec::new();
+            decoder.read_to_end(&mut buf)?;
+            buf
+        } else {
+            blob
+        };
+        let tile = crate::mvt::decode_tile(&raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+        out.insert(coord, tile);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

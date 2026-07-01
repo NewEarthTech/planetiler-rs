@@ -8,8 +8,10 @@
 //! diff land with the decoder in Phase 1 (see `docs/ARCHITECTURE.md` and
 //! `parity/README.md`).
 
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
-use planetiler_rs::bench::measure_command;
+use planetiler_rs::bench::{compare_archives, measure_command};
 
 /// planetiler-rs benchmark harness.
 #[derive(Parser)]
@@ -29,6 +31,13 @@ enum Command {
         #[arg(required = true, num_args = 1.., trailing_var_arg = true)]
         argv: Vec<String>,
     },
+    /// Semantically compare two MBTiles archives — the parity oracle.
+    Compare {
+        /// First archive (e.g. planetiler-rs output).
+        a: PathBuf,
+        /// Second archive (e.g. Planetiler output).
+        b: PathBuf,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -43,6 +52,9 @@ fn main() -> anyhow::Result<()> {
             if !measurement.exit_ok {
                 std::process::exit(1);
             }
+        }
+        Command::Compare { a, b } => {
+            println!("{}", compare_archives(&a, &b)?);
         }
     }
     Ok(())
