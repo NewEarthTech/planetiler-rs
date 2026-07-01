@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::archive::TileCompression;
 use crate::pipeline::{GenerateOptions, generate};
 use crate::profile::PassthroughProfile;
-use crate::source::read_geojson;
+use crate::source::read_source;
 
 /// planetiler-rs command-line interface.
 #[derive(Debug, Parser)]
@@ -108,7 +108,7 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
     }
 
     tracing::info!(source = %args.source.display(), "reading source");
-    let features = read_geojson(&args.source)?;
+    let features = read_source(&args.source)?;
 
     let options = GenerateOptions {
         min_zoom: args.minzoom,

@@ -5,14 +5,26 @@
 //! reader and shapefile/geoparquet follow in later phases.
 
 mod geojson;
+mod osm;
 
 pub use geojson::read_geojson;
+pub use osm::read_osm;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use geo_types::Geometry;
 
+use crate::error::Result;
 use crate::model::Value;
+
+/// Read a source file, dispatching by extension: `.pbf` → OSM, otherwise GeoJSON.
+pub fn read_source(path: &Path) -> Result<Vec<SourceFeature>> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("pbf") => read_osm(path),
+        _ => read_geojson(path),
+    }
+}
 
 /// A feature read from a source: geometry in lon/lat degrees, plus tags.
 #[derive(Debug, Clone)]
