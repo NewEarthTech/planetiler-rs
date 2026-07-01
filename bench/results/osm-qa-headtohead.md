@@ -8,16 +8,17 @@ Task: read an `.osm.pbf` extract and write all OSM features into a single `osm` 
 |---------|------|-----:|---------:|------:|
 | **monaco** (0.7 MB) | planetiler-rs | **0.089 s** | **69 MB** | 175 |
 | | Planetiler | 2.20 s | 1068 MB | 102 |
-| **rhode-island** (49 MB) | planetiler-rs | **4.21 s** | **680 MB** | 7522 |
+| **rhode-island** (49 MB) | planetiler-rs (ram) | **7.1 s** | 1025 MB | 2217 |
+| | planetiler-rs (mmap) | 7.7 s | **944 MB** | 2217 |
 | | Planetiler | 8.94 s | 7814 MB | 2203 |
 
-**Speed:** ~25× faster on monaco → **~2.1× faster** on rhode-island. **Memory:** ~15× less on monaco → **~11.5× less** on rhode-island.
+**Speed:** ~25× faster on monaco → **~1.25× faster** on rhode-island. **Memory:** ~15× less on monaco → **~7.6–8.3× less** on rhode-island (ram/mmap). **Tiles now match**: 2217 vs 2203 (was 7522 — relations + source-bounds clipping closed it).
 
 ## Reading the trend (honest)
 
-- **The time margin compresses with size** (25× → 2.1×) because monaco is so small that JVM cold-start (~1.5 s) dominates Planetiler's wall time. On rhode-island Java warms up and parallelizes, so ~2× is closer to the real steady-state speed advantage. We are still faster — but the honest headline speed number is ~2×, not ~25×.
-- **The memory margin holds and widens** (~11.5× at rhode-island) — the core reason for the rewrite (no GC, no reserved JVM heap), and it survives warm-up. Planetiler even *failed* to run monaco under `-Xmx512m` / `-Xmx256m`; it needs a large default heap.
-- **Our absolute memory now scales sub-linearly** (69 MB → 680 MB, ~14× the 49 MB input, down from ~25×) after the reader was made **streaming** and the node store **compacted** (fixed-point, 16 B/node): we no longer hold all features at once. Two in-RAM structures remain — the node-location store and the sort buffer (both bounded/tunable, both mmap-able) — so full planet scale still needs the off-heap `sparsearray` node store, but the linear-in-feature-count ceiling is gone.
+- **The rhode-island numbers are now a *fair* comparison.** The earlier 4.21 s / 680 MB / 7522-tile row was us doing *less* work than Java: no relations, no element metadata, no bounds clip. With those added (multipolygon/route assembly, `@id/@type/@version/@timestamp`, clip to the source bbox) the output matches — **2217 tiles vs Java's 2203** — and our absolute cost rose to ~7 s / ~1 GB. That is the honest apples-to-apples figure.
+- **Even at matched output we win on both axes**: ~1.25× faster and ~7.6–8.3× less memory — from no GC and no reserved JVM heap. Planetiler even *failed* to run monaco under `-Xmx512m` / `-Xmx256m`; it needs a large default heap.
+- **Node storage is selectable** (`--storage ram|mmap`). RAM is the fast default; mmap moves the node store off-heap (~80 MB less here, and comparable wall time) and is the **planet-scale path**: at planet the node store is ~144 GB, which cannot be a heap `Vec` at all. A compact `sparsearray` (8 B/node, no keys) is the next step.
 
 ## Output parity (monaco, z12-14, via `bench compare`)
 
