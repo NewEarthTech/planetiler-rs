@@ -19,9 +19,31 @@ Task: read an `.osm.pbf` extract and write all OSM features into a single `osm` 
 - **The memory margin holds and widens** (~11.5× at rhode-island) — the core reason for the rewrite (no GC, no reserved JVM heap), and it survives warm-up. Planetiler even *failed* to run monaco under `-Xmx512m` / `-Xmx256m`; it needs a large default heap.
 - **Our absolute memory now scales sub-linearly** (69 MB → 680 MB, ~14× the 49 MB input, down from ~25×) after the reader was made **streaming** and the node store **compacted** (fixed-point, 16 B/node): we no longer hold all features at once. Two in-RAM structures remain — the node-location store and the sort buffer (both bounded/tunable, both mmap-able) — so full planet scale still needs the off-heap `sparsearray` node store, but the linear-in-feature-count ceiling is gone.
 
-## Caveats (a strong directional win, not verified parity)
+## Output parity (monaco, z12-14, via `bench compare`)
 
-- **Outputs are not identical** (rhode-island: 7522 vs 2203 tiles). We render **nodes + ways** but not **relations** yet, and our min-size / simplify / buffer differ from `osm-qa`'s config. We produce *more* tiles for less time and memory — but it is not the same output. Verified apples-to-apples needs relations + matched config + the semantic-MVT diff.
+Measured with the parity oracle (`bench compare ours.mbtiles java.mbtiles`), which decodes both archives and reports tile-set overlap + per-tile semantic equality. Progress from the initial "wildly different" state:
+
+| milestone | result |
+|---|---|
+| start (nodes+ways, default config) | shared=95, only_a=80, only_b=7, identical=0 |
+| + **relations** (multipolygon/route) | only_b **7→0** — we cover every Planetiler tile |
+| + **source-bounds clip** (default = pbf bbox) | only_a **80→0** — **exact same 102-tile set** |
+| + **`@id/@type/@version/@timestamp`** metadata | shared features' attributes **byte-identical** |
+| + matched config (`--buffer 0 --min-size 0.3 --simplify 0.1`) | **identical=10, content_equal=41 → 51/102 tiles (50%) semantically match** |
+
+`content_equal` counts tiles equal up to polygon ring rotation/order (not semantically meaningful in MVT). The remaining 51 tiles differ only in **geometry precision** — our Douglas-Peucker simplification and min-size drop slightly different vertices/features than Planetiler's. Tile set, layer, feature ids, and attributes all match; the gap is now purely sub-pixel geometry detail.
+
+Matching invocation:
+
+```sh
+bench compare ours.mbtiles java.mbtiles   # decode + semantic diff
+planetiler-rs generate --source monaco.osm.pbf --output ours.mbtiles \
+  --layer osm --minzoom 12 --maxzoom 14 --buffer 0 --min-size 0.3 --simplify 0.1 --force
+```
+
+## Caveats (a strong directional win, partial verified parity)
+
+- **Not yet byte-identical** — 51/102 monaco tiles match semantically (up to ring rotation); the rest differ in simplification/min-size vertex selection. Tile set + attributes are exact. Full parity needs porting Planetiler's exact simplify + min-size thresholds.
 
 ## Reproduce
 
