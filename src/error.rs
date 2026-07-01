@@ -26,6 +26,10 @@ pub enum Error {
     #[error("invalid configuration: {0}")]
     Config(&'static str),
 
+    /// A malformed MVT geometry command stream was decoded.
+    #[error("malformed MVT geometry: {0}")]
+    MvtGeometry(&'static str),
+
     /// I/O failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
