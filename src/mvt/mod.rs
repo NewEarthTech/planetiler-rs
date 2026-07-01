@@ -7,7 +7,12 @@
 //! attribute-type mapping — mirrors upstream Planetiler exactly for drop-in
 //! parity (built out as the encoder lands).
 
+pub mod decode;
 pub mod geometry;
+
+pub use decode::{
+    DecodedFeature, DecodedGeometry, DecodedLayer, DecodedTile, decode_tile, semantically_equal,
+};
 
 /// Generated protobuf wire types for the MVT format (Mapbox spec 2.1),
 /// compiled from `proto/vector_tile.proto`.

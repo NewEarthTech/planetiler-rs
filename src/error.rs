@@ -30,6 +30,10 @@ pub enum Error {
     #[error("malformed MVT geometry: {0}")]
     MvtGeometry(&'static str),
 
+    /// A malformed or unexpected MVT tile was decoded.
+    #[error("malformed MVT tile: {0}")]
+    MvtDecode(&'static str),
+
     /// I/O failure.
     #[error(transparent)]
     Io(#[from] std::io::Error),
