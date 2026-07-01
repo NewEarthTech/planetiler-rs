@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand};
 
 use crate::archive::TileCompression;
-use crate::pipeline::{GenerateOptions, generate};
+use crate::pipeline::{GenerateOptions, generate_streaming};
 use crate::profile::PassthroughProfile;
-use crate::source::read_source;
+use crate::source::stream_source;
 
 /// planetiler-rs command-line interface.
 #[derive(Debug, Parser)]
@@ -107,8 +107,7 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
         }
     }
 
-    tracing::info!(source = %args.source.display(), "reading source");
-    let features = read_source(&args.source)?;
+    tracing::info!(source = %args.source.display(), "streaming source");
 
     let options = GenerateOptions {
         min_zoom: args.minzoom,
@@ -123,7 +122,12 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
         layer_type: "overlay".to_owned(),
     };
     let profile = PassthroughProfile::new(args.layer);
-    let stats = generate(&features, &profile, &options, &args.output)?;
+    let stats = generate_streaming(
+        |sink| stream_source(&args.source, sink),
+        &profile,
+        &options,
+        &args.output,
+    )?;
 
     println!(
         "Wrote {}: {} tiles from {} features (z{}-{}).",

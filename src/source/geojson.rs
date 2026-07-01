@@ -8,7 +8,7 @@ use std::path::Path;
 
 use geo_types::Geometry;
 
-use super::SourceFeature;
+use super::{FeatureSink, SourceFeature};
 use crate::error::{Error, Result};
 use crate::model::Value;
 
@@ -17,33 +17,42 @@ use crate::model::Value;
 /// # Errors
 /// Returns [`Error::Source`] if the file is not valid GeoJSON or contains a
 /// geometry type geo-types cannot represent.
-pub fn read_geojson(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
+pub fn stream_geojson(path: &Path, sink: &mut FeatureSink) -> Result<()> {
     let text = std::fs::read_to_string(path)?;
     let parsed: ::geojson::GeoJson = text.parse().map_err(|_| Error::Source("invalid GeoJSON"))?;
 
-    let mut out = Vec::new();
     match parsed {
         ::geojson::GeoJson::FeatureCollection(fc) => {
             for (i, feature) in fc.features.into_iter().enumerate() {
                 if let Some(sf) = convert_feature(feature, i as u64)? {
-                    out.push(sf);
+                    sink(sf)?;
                 }
             }
         }
         ::geojson::GeoJson::Feature(feature) => {
             if let Some(sf) = convert_feature(feature, 0)? {
-                out.push(sf);
+                sink(sf)?;
             }
         }
         ::geojson::GeoJson::Geometry(geometry) => {
-            out.push(SourceFeature {
+            sink(SourceFeature {
                 id: 0,
                 geometry: convert_geometry(geometry)?,
                 tags: BTreeMap::new(),
-            });
+            })?;
         }
     }
-    Ok(out)
+    Ok(())
+}
+
+/// Collect all GeoJSON features into a `Vec` (small inputs / tests).
+pub fn read_geojson(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
+    let mut features = Vec::new();
+    stream_geojson(path.as_ref(), &mut |feature| {
+        features.push(feature);
+        Ok(())
+    })?;
+    Ok(features)
 }
 
 fn convert_feature(feature: ::geojson::Feature, fallback_id: u64) -> Result<Option<SourceFeature>> {

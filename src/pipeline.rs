@@ -77,17 +77,25 @@ pub struct GenerateStats {
     pub tiles: usize,
 }
 
-/// Run the pipeline: source features → profile → render → external sort → MBTiles.
-pub fn generate(
-    features: &[SourceFeature],
+/// Run the pipeline over a streaming source: features → profile → render →
+/// external sort → MBTiles. The `stream` closure pushes each source feature to a
+/// sink, so the whole extract is never held in memory — peak RAM is bounded by
+/// one render batch, the sort buffer, and (for OSM) the node store.
+pub fn generate_streaming<S>(
+    stream: S,
     profile: &dyn Profile,
     options: &GenerateOptions,
     output: impl AsRef<Path>,
-) -> Result<GenerateStats> {
+) -> Result<GenerateStats>
+where
+    S: FnOnce(&mut dyn FnMut(SourceFeature) -> Result<()>) -> Result<()>,
+{
     let mut sort = ExternalMergeSort::new(options.sort_memory_bytes)?;
     let mut registry = LayerRegistry::default();
     let mut layer_stats: BTreeMap<String, LayerStat> = BTreeMap::new();
     let mut bounds = Bounds::default();
+    let mut batch: Vec<VectorFeature> = Vec::new();
+    let mut feature_count: usize = 0;
 
     let render_options = RenderOptions {
         min_zoom: options.min_zoom,
@@ -97,46 +105,29 @@ pub fn generate(
         min_size_px: options.min_size_px,
         simplify_tolerance_px: options.simplify_tolerance_px,
     };
-
-    // Render in batches: the profile pass, stats, and bounds are cheap and stay
-    // serial; the expensive render + blob-encode runs across cores with rayon.
-    // Collecting preserves input order, so layer interning and the sorted output
-    // stay deterministic. Memory is bounded to one batch plus the sort buffer.
     const RENDER_BATCH: usize = 4096;
-    for batch in features.chunks(RENDER_BATCH) {
-        let mut batch_features: Vec<VectorFeature> = Vec::new();
-        for source in batch {
+
+    // The profile pass, stats, and bounds stay serial and cheap; a full batch is
+    // rendered + blob-encoded across cores (order preserved for determinism) and
+    // fed to the sort.
+    {
+        let mut sink = |source: SourceFeature| -> Result<()> {
+            feature_count += 1;
             bounds.add_geometry(&source.geometry);
-            let mut collector = FeatureCollector::new(source, options.min_zoom, options.max_zoom);
-            profile.process_feature(source, &mut collector);
+            let mut collector = FeatureCollector::new(&source, options.min_zoom, options.max_zoom);
+            profile.process_feature(&source, &mut collector);
             for feature in collector.into_features() {
                 record_layer_stats(&mut layer_stats, &feature, options);
-                batch_features.push(feature);
+                batch.push(feature);
             }
-        }
-
-        let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = batch_features
-            .par_iter()
-            .flat_map_iter(|feature| {
-                render_feature(feature, &render_options)
-                    .into_iter()
-                    .map(|r| {
-                        let blob = encode_blob(&FeatureBlob {
-                            id: r.id,
-                            geometry: r.geometry,
-                            attrs: r.attrs,
-                        })
-                        .expect("feature blob encode is infallible for rendered features");
-                        (r.coord, r.layer, r.zorder, blob)
-                    })
-            })
-            .collect();
-
-        for (coord, layer_name, zorder, blob) in rendered {
-            let layer = registry.intern(&layer_name)?;
-            sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
-        }
+            if batch.len() >= RENDER_BATCH {
+                flush_render_batch(&mut batch, &render_options, &mut registry, &mut sort)?;
+            }
+            Ok(())
+        };
+        stream(&mut sink)?;
     }
+    flush_render_batch(&mut batch, &render_options, &mut registry, &mut sort)?;
 
     let metadata = build_metadata(&layer_stats, &bounds, options, profile);
     let mut writer = MbtilesWriter::create(output, options.compression)?;
@@ -151,9 +142,64 @@ pub fn generate(
     writer.finish()?;
 
     Ok(GenerateStats {
-        features: features.len(),
+        features: feature_count,
         tiles,
     })
+}
+
+/// Convenience wrapper generating from an in-memory slice of features.
+pub fn generate(
+    features: &[SourceFeature],
+    profile: &dyn Profile,
+    options: &GenerateOptions,
+    output: impl AsRef<Path>,
+) -> Result<GenerateStats> {
+    generate_streaming(
+        |sink| {
+            for feature in features {
+                sink(feature.clone())?;
+            }
+            Ok(())
+        },
+        profile,
+        options,
+        output,
+    )
+}
+
+/// Render + blob-encode a batch of vector features across cores, intern their
+/// layers, and feed them to the sort. Clears the batch.
+fn flush_render_batch(
+    batch: &mut Vec<VectorFeature>,
+    render_options: &RenderOptions,
+    registry: &mut LayerRegistry,
+    sort: &mut ExternalMergeSort,
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = batch
+        .par_iter()
+        .flat_map_iter(|feature| {
+            render_feature(feature, render_options)
+                .into_iter()
+                .map(|r| {
+                    let blob = encode_blob(&FeatureBlob {
+                        id: r.id,
+                        geometry: r.geometry,
+                        attrs: r.attrs,
+                    })
+                    .expect("feature blob encode is infallible for rendered features");
+                    (r.coord, r.layer, r.zorder, blob)
+                })
+        })
+        .collect();
+    for (coord, layer_name, zorder, blob) in rendered {
+        let layer = registry.intern(&layer_name)?;
+        sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
+    }
+    batch.clear();
+    Ok(())
 }
 
 /// Stream the sorted entries, group consecutive same-tile records into complete

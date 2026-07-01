@@ -7,8 +7,8 @@
 mod geojson;
 mod osm;
 
-pub use geojson::read_geojson;
-pub use osm::read_osm;
+pub use geojson::{read_geojson, stream_geojson};
+pub use osm::{read_osm, stream_osm};
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -18,11 +18,16 @@ use geo_types::Geometry;
 use crate::error::Result;
 use crate::model::Value;
 
-/// Read a source file, dispatching by extension: `.pbf` → OSM, otherwise GeoJSON.
-pub fn read_source(path: &Path) -> Result<Vec<SourceFeature>> {
+/// A sink that receives source features one at a time, so readers can stream
+/// without materializing the whole extract in memory.
+pub type FeatureSink<'a> = dyn FnMut(SourceFeature) -> Result<()> + 'a;
+
+/// Stream a source file into `sink`, dispatching by extension: `.pbf` → OSM,
+/// otherwise GeoJSON.
+pub fn stream_source(path: &Path, sink: &mut FeatureSink) -> Result<()> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("pbf") => read_osm(path),
-        _ => read_geojson(path),
+        Some("pbf") => stream_osm(path, sink),
+        _ => stream_geojson(path, sink),
     }
 }
 

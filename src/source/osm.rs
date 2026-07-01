@@ -12,7 +12,7 @@ use std::path::Path;
 use geo_types::{Coord, Geometry, LineString, Point, Polygon};
 use osmpbf::{Element, ElementReader};
 
-use super::SourceFeature;
+use super::{FeatureSink, SourceFeature};
 use crate::collection::NodeLocations;
 use crate::error::{Error, Result};
 use crate::model::Value;
@@ -31,36 +31,51 @@ const AREA_KEYS: &[&str] = &[
 ///
 /// # Errors
 /// Returns [`Error::Source`] if the PBF cannot be read.
-pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
-    let path = path.as_ref();
+pub fn stream_osm(path: &Path, sink: &mut FeatureSink) -> Result<()> {
     let mut locations = NodeLocations::default();
-    let mut features: Vec<SourceFeature> = Vec::new();
+    // osmpbf's `for_each` closure can't return a Result, so capture the first
+    // sink error and skip the rest, then propagate it after the pass.
+    let mut sink_err: Option<Error> = None;
 
     // Pass 1: record all node locations; emit tagged nodes as points.
     reader(path)?
         .for_each(|element| match element {
             Element::Node(node) => {
                 locations.put(node.id(), node.lon(), node.lat());
-                let tags = collect_tags(node.tags());
-                if !tags.is_empty() {
-                    features.push(point(node.id(), node.lon(), node.lat(), tags));
-                }
+                emit_node(
+                    node.id(),
+                    node.lon(),
+                    node.lat(),
+                    collect_tags(node.tags()),
+                    sink,
+                    &mut sink_err,
+                );
             }
             Element::DenseNode(node) => {
                 locations.put(node.id(), node.lon(), node.lat());
-                let tags = collect_tags(node.tags());
-                if !tags.is_empty() {
-                    features.push(point(node.id(), node.lon(), node.lat(), tags));
-                }
+                emit_node(
+                    node.id(),
+                    node.lon(),
+                    node.lat(),
+                    collect_tags(node.tags()),
+                    sink,
+                    &mut sink_err,
+                );
             }
             Element::Way(_) | Element::Relation(_) => {}
         })
         .map_err(|_| Error::Source("failed to read OSM PBF (node pass)"))?;
+    if let Some(err) = sink_err.take() {
+        return Err(err);
+    }
     locations.finish();
 
     // Pass 2: assemble tagged ways from node locations.
     reader(path)?
         .for_each(|element| {
+            if sink_err.is_some() {
+                return;
+            }
             if let Element::Way(way) = element {
                 let tags = collect_tags(way.tags());
                 if tags.is_empty() {
@@ -71,14 +86,45 @@ pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
                 if coords.len() < 2 {
                     return;
                 }
-                if let Some(feature) = way_feature(way.id(), &coords, tags) {
-                    features.push(feature);
+                if let Some(feature) = way_feature(way.id(), &coords, tags)
+                    && let Err(err) = sink(feature)
+                {
+                    sink_err = Some(err);
                 }
             }
         })
         .map_err(|_| Error::Source("failed to read OSM PBF (way pass)"))?;
+    if let Some(err) = sink_err.take() {
+        return Err(err);
+    }
+    Ok(())
+}
 
+/// Collect all OSM features into a `Vec` (small extracts / tests). Prefer
+/// [`stream_osm`] for large inputs.
+pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
+    let mut features = Vec::new();
+    stream_osm(path.as_ref(), &mut |feature| {
+        features.push(feature);
+        Ok(())
+    })?;
     Ok(features)
+}
+
+fn emit_node(
+    id: i64,
+    lon: f64,
+    lat: f64,
+    tags: BTreeMap<String, Value>,
+    sink: &mut FeatureSink,
+    sink_err: &mut Option<Error>,
+) {
+    if tags.is_empty() || sink_err.is_some() {
+        return;
+    }
+    if let Err(err) = sink(point(id, lon, lat, tags)) {
+        *sink_err = Some(err);
+    }
 }
 
 fn reader(path: &Path) -> Result<ElementReader<std::io::BufReader<std::fs::File>>> {
