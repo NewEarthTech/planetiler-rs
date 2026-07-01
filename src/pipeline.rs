@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use geo_types::Geometry;
+use rayon::prelude::*;
 
 use crate::archive::{
     FieldType, MbtilesWriter, TileArchive, TileArchiveMetadata, TileCompression, VectorLayer,
@@ -97,29 +98,56 @@ pub fn generate(
         simplify_tolerance_px: options.simplify_tolerance_px,
     };
 
-    for source in features {
-        bounds.add_geometry(&source.geometry);
-        let mut collector = FeatureCollector::new(source, options.min_zoom, options.max_zoom);
-        profile.process_feature(source, &mut collector);
-        for feature in collector.into_features() {
-            record_layer_stats(&mut layer_stats, &feature, options);
-            for rendered in render_feature(&feature, &render_options) {
-                let layer = registry.intern(&rendered.layer)?;
-                let key = SortKey::new(rendered.coord, layer, rendered.zorder)?;
-                let blob = encode_blob(&FeatureBlob {
-                    id: rendered.id,
-                    geometry: rendered.geometry,
-                    attrs: rendered.attrs,
-                })?;
-                sort.add(Entry::new(key, blob))?;
+    // Render in batches: the profile pass, stats, and bounds are cheap and stay
+    // serial; the expensive render + blob-encode runs across cores with rayon.
+    // Collecting preserves input order, so layer interning and the sorted output
+    // stay deterministic. Memory is bounded to one batch plus the sort buffer.
+    const RENDER_BATCH: usize = 4096;
+    for batch in features.chunks(RENDER_BATCH) {
+        let mut batch_features: Vec<VectorFeature> = Vec::new();
+        for source in batch {
+            bounds.add_geometry(&source.geometry);
+            let mut collector = FeatureCollector::new(source, options.min_zoom, options.max_zoom);
+            profile.process_feature(source, &mut collector);
+            for feature in collector.into_features() {
+                record_layer_stats(&mut layer_stats, &feature, options);
+                batch_features.push(feature);
             }
+        }
+
+        let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = batch_features
+            .par_iter()
+            .flat_map_iter(|feature| {
+                render_feature(feature, &render_options)
+                    .into_iter()
+                    .map(|r| {
+                        let blob = encode_blob(&FeatureBlob {
+                            id: r.id,
+                            geometry: r.geometry,
+                            attrs: r.attrs,
+                        })
+                        .expect("feature blob encode is infallible for rendered features");
+                        (r.coord, r.layer, r.zorder, blob)
+                    })
+            })
+            .collect();
+
+        for (coord, layer_name, zorder, blob) in rendered {
+            let layer = registry.intern(&layer_name)?;
+            sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
         }
     }
 
     let metadata = build_metadata(&layer_stats, &bounds, options, profile);
     let mut writer = MbtilesWriter::create(output, options.compression)?;
     writer.write_metadata(&metadata)?;
-    let tiles = write_sorted_tiles(sort, &registry, options.extent, &mut writer)?;
+    let tiles = write_sorted_tiles(
+        sort,
+        &registry,
+        options.extent,
+        options.compression,
+        &mut writer,
+    )?;
     writer.finish()?;
 
     Ok(GenerateStats {
@@ -128,24 +156,43 @@ pub fn generate(
     })
 }
 
-/// Stream the sorted entries, group consecutive same-tile records, and write.
+/// Stream the sorted entries, group consecutive same-tile records into complete
+/// tiles, then encode + compress a batch of them in parallel and insert serially.
 fn write_sorted_tiles(
     sort: ExternalMergeSort,
     registry: &LayerRegistry,
     extent: u32,
+    compression: TileCompression,
     writer: &mut MbtilesWriter,
 ) -> Result<usize> {
+    const WRITE_BATCH: usize = 256;
     let mut tiles_written = 0;
     let mut current: Option<TileCoord> = None;
     let mut layers: BTreeMap<u8, Vec<mvt::Feature>> = BTreeMap::new();
+    let mut batch: Vec<(TileCoord, mvt::Tile)> = Vec::new();
+
+    let finalize = |coord: TileCoord, layers: &mut BTreeMap<u8, Vec<mvt::Feature>>| {
+        let mvt_layers = std::mem::take(layers)
+            .into_iter()
+            .map(|(index, features)| mvt::Layer {
+                name: registry.name(index).to_owned(),
+                version: 2,
+                extent,
+                features,
+            })
+            .collect();
+        (coord, mvt::Tile { layers: mvt_layers })
+    };
 
     for entry in sort.into_sorted()? {
         let entry = entry?;
         let tile = entry.key.tile();
         if current != Some(tile) {
             if let Some(previous) = current.take() {
-                flush_tile(previous, &mut layers, registry, extent, writer)?;
-                tiles_written += 1;
+                batch.push(finalize(previous, &mut layers));
+                if batch.len() >= WRITE_BATCH {
+                    flush_batch(&mut batch, compression, writer, &mut tiles_written)?;
+                }
             }
             current = Some(tile);
         }
@@ -160,29 +207,32 @@ fn write_sorted_tiles(
             });
     }
     if let Some(previous) = current.take() {
-        flush_tile(previous, &mut layers, registry, extent, writer)?;
-        tiles_written += 1;
+        batch.push(finalize(previous, &mut layers));
     }
+    flush_batch(&mut batch, compression, writer, &mut tiles_written)?;
     Ok(tiles_written)
 }
 
-fn flush_tile(
-    coord: TileCoord,
-    layers: &mut BTreeMap<u8, Vec<mvt::Feature>>,
-    registry: &LayerRegistry,
-    extent: u32,
+/// Encode + compress a batch of tiles across cores, then insert them serially.
+fn flush_batch(
+    batch: &mut Vec<(TileCoord, mvt::Tile)>,
+    compression: TileCompression,
     writer: &mut MbtilesWriter,
+    count: &mut usize,
 ) -> Result<()> {
-    let mvt_layers = std::mem::take(layers)
-        .into_iter()
-        .map(|(index, features)| mvt::Layer {
-            name: registry.name(index).to_owned(),
-            version: 2,
-            extent,
-            features,
-        })
-        .collect();
-    writer.write_tile(coord, &encode_tile(&mvt::Tile { layers: mvt_layers }))
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let compressed: Vec<(TileCoord, Vec<u8>)> = batch
+        .par_iter()
+        .map(|(coord, tile)| Ok::<_, Error>((*coord, compression.compress(&encode_tile(tile))?)))
+        .collect::<Result<Vec<_>>>()?;
+    for (coord, bytes) in compressed {
+        writer.write_tile_compressed(coord, &bytes)?;
+        *count += 1;
+    }
+    batch.clear();
+    Ok(())
 }
 
 /// The opaque per-feature payload sorted alongside the sort key.

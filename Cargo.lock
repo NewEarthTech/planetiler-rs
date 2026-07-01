@@ -839,6 +839,7 @@ dependencies = [
  "postcard",
  "prost",
  "prost-build",
+ "rayon",
  "rusqlite",
  "serde",
  "serde_json",

@@ -83,11 +83,12 @@ impl MbtilesWriter {
     }
 }
 
-impl TileArchive for MbtilesWriter {
-    fn write_tile(&mut self, coord: TileCoord, mvt: &[u8]) -> Result<()> {
-        let compressed = self.compression.compress(mvt)?;
-
-        let data_id = match self.dedup.get(&compressed) {
+impl MbtilesWriter {
+    /// Write an already-compressed tile: dedup the blob, then insert its
+    /// TMS-flipped position. Compression (the expensive part) is done by the
+    /// caller so it can run in parallel; this method is the serial writer.
+    pub fn write_tile_compressed(&mut self, coord: TileCoord, compressed: &[u8]) -> Result<()> {
+        let data_id = match self.dedup.get(compressed) {
             Some(&id) => id,
             None => {
                 let id = self.next_data_id;
@@ -96,7 +97,7 @@ impl TileArchive for MbtilesWriter {
                     "INSERT OR IGNORE INTO tiles_data (tile_data_id, tile_data) VALUES (?1, ?2)",
                     params![id, compressed],
                 )?;
-                self.dedup.insert(compressed, id);
+                self.dedup.insert(compressed.to_vec(), id);
                 id
             }
         };
@@ -109,6 +110,13 @@ impl TileArchive for MbtilesWriter {
             params![coord.z(), coord.x(), tms_y, data_id],
         )?;
         Ok(())
+    }
+}
+
+impl TileArchive for MbtilesWriter {
+    fn write_tile(&mut self, coord: TileCoord, mvt: &[u8]) -> Result<()> {
+        let compressed = self.compression.compress(mvt)?;
+        self.write_tile_compressed(coord, &compressed)
     }
 
     fn set_metadata(&mut self, key: &str, value: &str) -> Result<()> {
