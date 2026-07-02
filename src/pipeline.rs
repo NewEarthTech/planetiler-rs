@@ -120,6 +120,7 @@ where
     // The profile pass, stats, and bounds stay serial and cheap; a full batch is
     // rendered + blob-encoded across cores (order preserved for determinism) and
     // fed to the sort.
+    let stream_start = std::time::Instant::now();
     {
         let mut sink = |source: SourceFeature| -> Result<()> {
             feature_count += 1;
@@ -138,7 +139,13 @@ where
         stream(&mut sink)?;
     }
     flush_render_batch(&mut batch, &render_options, &mut registry, &mut sort)?;
+    tracing::info!(
+        elapsed_s = stream_start.elapsed().as_secs_f64(),
+        entries = sort.len(),
+        "stream + render + sort-feed done"
+    );
 
+    let write_start = std::time::Instant::now();
     let metadata = build_metadata(&layer_stats, &bounds, options, profile);
     let mut writer = MbtilesWriter::create(output, options.compression)?;
     writer.write_metadata(&metadata)?;
@@ -151,6 +158,11 @@ where
         &mut writer,
     )?;
     writer.finish()?;
+    tracing::info!(
+        elapsed_s = write_start.elapsed().as_secs_f64(),
+        tiles,
+        "merge + encode + write done"
+    );
 
     Ok(GenerateStats {
         features: feature_count,
