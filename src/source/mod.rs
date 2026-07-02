@@ -6,9 +6,11 @@
 
 mod geojson;
 mod osm;
+mod shapefile;
 
 pub use geojson::{read_geojson, stream_geojson};
 pub use osm::{osm_bounds, read_osm, stream_osm};
+pub use shapefile::stream_shapefile;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -67,6 +69,7 @@ pub fn stream_source(
 ) -> Result<()> {
     match path.extension().and_then(|e| e.to_str()) {
         Some("pbf") => stream_osm(path, sink, storage, relations),
+        Some("shp") => stream_shapefile(path, sink),
         _ => stream_geojson(path, sink),
     }
 }

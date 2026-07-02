@@ -14,3 +14,6 @@
 CLAUDE.md
 CLAUDE.local.md
 .claude/
+
+# Planetiler's default scratch dir (spawned when benchmarking the jar from the repo root)
+/data/
