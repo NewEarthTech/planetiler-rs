@@ -55,11 +55,13 @@ pub struct GenerateArgs {
     /// Tile buffer in extent units.
     #[arg(long, default_value_t = 64.0)]
     pub buffer: f64,
-    /// Drop features smaller than this many screen pixels per zoom (0 keeps all).
+    /// Drop features smaller than this many pixels (line length; sqrt polygon
+    /// area) below maxzoom; at maxzoom 1/16 px is always used, like Planetiler.
     #[arg(long = "min-size", default_value_t = 1.0)]
     pub min_size: f64,
-    /// Douglas–Peucker simplification tolerance in pixels (0 disables).
-    #[arg(long, default_value_t = 0.0)]
+    /// Douglas–Peucker tolerance in pixels below maxzoom; at maxzoom 1/16 px is
+    /// always used, like Planetiler.
+    #[arg(long, default_value_t = 0.1)]
     pub simplify: f64,
     /// Only emit tiles within these lon/lat bounds `west,south,east,north`.
     /// Defaults to the OSM source's header bbox (like Planetiler); pass `world`

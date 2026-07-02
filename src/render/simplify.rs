@@ -1,62 +1,111 @@
-//! Douglas–Peucker line simplification in tile space.
+//! Douglas–Peucker line simplification in tile space, ported to match
+//! Planetiler's `DouglasPeuckerSimplifier` exactly (itself adapted from JTS):
+//! distances are measured to the *segment* (not the infinite line), endpoints
+//! are always kept, and closed rings force-keep their two furthest interior
+//! points even when below tolerance so small rings never collapse — the
+//! subsequent area filter removes tiny rings more accurately than collapse
+//! would. The forced-point budget propagates asymmetrically (left `n-1`,
+//! right `n-2`) through the recursion, mirroring upstream so vertex selection
+//! is identical.
 
-/// Simplify a polyline with Douglas–Peucker: drop points whose perpendicular
-/// distance from the retained baseline is within `tolerance`. Endpoints are kept.
-/// `tolerance <= 0` or fewer than three points returns the input unchanged.
-pub fn simplify(points: &[(f64, f64)], tolerance: f64) -> Vec<(f64, f64)> {
-    if points.len() <= 2 || tolerance <= 0.0 {
+/// Simplify a polyline or closed ring with Douglas–Peucker.
+///
+/// `points` for a ring must be the *closed* form (first == last); pass
+/// `is_ring = true` so at least 4 points (3 distinct) survive. A negative
+/// `tolerance` returns the input unchanged; `0` drops only exactly-collinear
+/// points, matching upstream.
+pub fn simplify(points: &[(f64, f64)], tolerance: f64, is_ring: bool) -> Vec<(f64, f64)> {
+    let min_points = if is_ring { 4 } else { 2 };
+    if points.len() <= min_points || tolerance < 0.0 {
         return points.to_vec();
     }
-    let tol_sq = tolerance * tolerance;
-    let mut keep = vec![false; points.len()];
-    keep[0] = true;
-    keep[points.len() - 1] = true;
-    douglas_peucker(points, 0, points.len() - 1, tol_sq, &mut keep);
-    points
-        .iter()
-        .zip(keep)
-        .filter_map(|(p, k)| k.then_some(*p))
-        .collect()
+    let sq_tolerance = tolerance * tolerance.abs();
+    let mut out = Vec::with_capacity(points.len());
+    out.push(points[0]);
+    subsimplify(
+        points,
+        &mut out,
+        0,
+        points.len() - 1,
+        min_points as i32 - 2,
+        sq_tolerance,
+    );
+    out.push(points[points.len() - 1]);
+    out
 }
 
-fn douglas_peucker(
+/// In-order recursive step. `num_forced_points > 0` keeps the furthest point
+/// even when it is below tolerance (ring anti-collapse).
+fn subsimplify(
     points: &[(f64, f64)],
+    out: &mut Vec<(f64, f64)>,
     first: usize,
     last: usize,
-    tol_sq: f64,
-    keep: &mut [bool],
+    num_forced_points: i32,
+    sq_tolerance: f64,
 ) {
-    if last <= first + 1 {
-        return;
-    }
-    let a = points[first];
-    let b = points[last];
-    let mut max_dist = 0.0;
-    let mut split = first;
-    for (offset, &p) in points[(first + 1)..last].iter().enumerate() {
-        let d = perp_dist_sq(p, a, b);
-        if d > max_dist {
-            max_dist = d;
-            split = first + 1 + offset;
+    let force = num_forced_points > 0;
+    let mut max_sq_dist = if force { -1.0 } else { sq_tolerance };
+    let mut index = usize::MAX;
+    let (p1x, p1y) = points[first];
+    let (p2x, p2y) = points[last];
+
+    for (offset, &(px, py)) in points[(first + 1)..last].iter().enumerate() {
+        let sq_dist = sq_seg_dist(px, py, p1x, p1y, p2x, p2y);
+        if sq_dist > max_sq_dist {
+            index = first + 1 + offset;
+            max_sq_dist = sq_dist;
         }
     }
-    if max_dist > tol_sq {
-        keep[split] = true;
-        douglas_peucker(points, first, split, tol_sq, keep);
-        douglas_peucker(points, split, last, tol_sq, keep);
+
+    if force || max_sq_dist > sq_tolerance {
+        if index - first > 1 {
+            subsimplify(
+                points,
+                out,
+                first,
+                index,
+                num_forced_points - 1,
+                sq_tolerance,
+            );
+        }
+        out.push(points[index]);
+        if last - index > 1 {
+            subsimplify(
+                points,
+                out,
+                index,
+                last,
+                num_forced_points - 2,
+                sq_tolerance,
+            );
+        }
     }
 }
 
-/// Squared perpendicular distance from `p` to the infinite line through `a`–`b`.
-fn perp_dist_sq(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let len_sq = dx * dx + dy * dy;
-    if len_sq == 0.0 {
-        let (ex, ey) = (p.0 - a.0, p.1 - a.1);
-        return ex * ex + ey * ey;
+/// Squared distance from `(px, py)` to the *segment* `(p1x, p1y)-(p2x, p2y)`
+/// (endpoint distance beyond the segment ends), matching upstream's
+/// `getSqSegDist`.
+fn sq_seg_dist(px: f64, py: f64, p1x: f64, p1y: f64, p2x: f64, p2y: f64) -> f64 {
+    let mut x = p1x;
+    let mut y = p1y;
+    let mut dx = p2x - x;
+    let mut dy = p2y - y;
+
+    if dx != 0.0 || dy != 0.0 {
+        let t = ((px - x) * dx + (py - y) * dy) / (dx * dx + dy * dy);
+        if t > 1.0 {
+            x = p2x;
+            y = p2y;
+        } else if t > 0.0 {
+            x += dx * t;
+            y += dy * t;
+        }
     }
-    let cross = dx * (a.1 - p.1) - dy * (a.0 - p.0);
-    cross * cross / len_sq
+
+    dx = px - x;
+    dy = py - y;
+    dx * dx + dy * dy
 }
 
 #[cfg(test)]
@@ -73,7 +122,7 @@ mod tests {
             (15.0, 0.05),
             (20.0, 0.0),
         ];
-        let simplified = simplify(&line, 1.0);
+        let simplified = simplify(&line, 1.0, false);
         assert_eq!(simplified, vec![(0.0, 0.0), (20.0, 0.0)]);
     }
 
@@ -81,16 +130,52 @@ mod tests {
     fn keeps_significant_vertices() {
         // A clear spike is preserved.
         let line = [(0.0, 0.0), (5.0, 10.0), (10.0, 0.0)];
-        assert_eq!(simplify(&line, 1.0), line.to_vec());
+        assert_eq!(simplify(&line, 1.0, false), line.to_vec());
     }
 
     #[test]
-    fn passthrough_when_disabled_or_short() {
+    fn negative_tolerance_passes_through() {
         let line = [(0.0, 0.0), (1.0, 5.0), (2.0, 0.0)];
-        assert_eq!(simplify(&line, 0.0), line.to_vec());
+        assert_eq!(simplify(&line, -1.0, false), line.to_vec());
         assert_eq!(
-            simplify(&[(0.0, 0.0), (1.0, 1.0)], 5.0),
+            simplify(&[(0.0, 0.0), (1.0, 1.0)], 5.0, false),
             vec![(0.0, 0.0), (1.0, 1.0)]
         );
+    }
+
+    #[test]
+    fn zero_tolerance_drops_exactly_collinear_points_only() {
+        // (5,0) is exactly on the (0,0)-(10,0) sub-baseline and goes; (10,0)
+        // stays because its baseline becomes (0,0)-(15,0.1) once the spike is
+        // kept — hand-traced against upstream's recursion.
+        let line = [
+            (0.0, 0.0),
+            (5.0, 0.0),
+            (10.0, 0.0),
+            (15.0, 0.1),
+            (20.0, 0.0),
+        ];
+        assert_eq!(
+            simplify(&line, 0.0, false),
+            vec![(0.0, 0.0), (10.0, 0.0), (15.0, 0.1), (20.0, 0.0)]
+        );
+    }
+
+    #[test]
+    fn ring_below_tolerance_keeps_two_forced_interior_points() {
+        // A tiny closed square, far below tolerance: upstream keeps the two
+        // furthest interior points instead of collapsing the ring.
+        let ring = [(0.0, 0.0), (0.1, 0.0), (0.1, 0.1), (0.0, 0.1), (0.0, 0.0)];
+        let simplified = simplify(&ring, 10.0, true);
+        assert_eq!(simplified.len(), 4, "endpoints + 2 forced interior points");
+        assert_eq!(simplified.first(), simplified.last());
+    }
+
+    #[test]
+    fn distance_is_to_segment_not_infinite_line() {
+        // The middle point is beyond the segment end: its distance to the
+        // *segment* is large even though the infinite line passes near it.
+        let line = [(0.0, 0.0), (30.0, 0.5), (10.0, 0.0)];
+        assert_eq!(simplify(&line, 1.0, false), line.to_vec());
     }
 }
