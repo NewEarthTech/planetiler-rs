@@ -4,13 +4,75 @@
 //! order plus archive metadata, applying its own per-tile compression. The
 //! [`MbtilesWriter`] targets the MBTiles format with the compact/dedup schema,
 //! `application_id`, TMS Y-flip, and metadata rows that mirror upstream
-//! Planetiler for drop-in parity. A PMTiles writer follows in Phase 5.
+//! Planetiler for drop-in parity; [`PmtilesWriter`] targets PMTiles v3
+//! (clustered, Hilbert tile ids, leaf directories). [`ArchiveWriter`]
+//! dispatches between them by the output path's extension.
 
 mod mbtiles;
 mod metadata;
+mod pmtiles;
+
+use std::path::Path;
 
 pub use mbtiles::MbtilesWriter;
 pub use metadata::{FieldType, TileArchiveMetadata, VectorLayer};
+pub use pmtiles::{PmtilesWriter, zxy_to_tile_id};
+
+/// A tile archive writer selected by output extension: `.pmtiles` → PMTiles
+/// v3, anything else → MBTiles.
+pub enum ArchiveWriter {
+    /// MBTiles (SQLite) output.
+    Mbtiles(MbtilesWriter),
+    /// PMTiles v3 output.
+    Pmtiles(PmtilesWriter),
+}
+
+impl ArchiveWriter {
+    /// Create the writer implied by `path`'s extension.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying writer cannot be created.
+    pub fn create(path: impl AsRef<Path>, compression: TileCompression) -> Result<Self> {
+        let path = path.as_ref();
+        Ok(match path.extension().and_then(|e| e.to_str()) {
+            Some("pmtiles") => ArchiveWriter::Pmtiles(PmtilesWriter::create(path, compression)?),
+            _ => ArchiveWriter::Mbtiles(MbtilesWriter::create(path, compression)?),
+        })
+    }
+
+    /// Write the archive metadata.
+    ///
+    /// # Errors
+    /// Propagates the underlying writer's error.
+    pub fn write_metadata(&mut self, metadata: &TileArchiveMetadata) -> Result<()> {
+        match self {
+            ArchiveWriter::Mbtiles(w) => w.write_metadata(metadata),
+            ArchiveWriter::Pmtiles(w) => w.write_metadata(metadata),
+        }
+    }
+
+    /// Write one already-compressed tile.
+    ///
+    /// # Errors
+    /// Propagates the underlying writer's error.
+    pub fn write_tile_compressed(&mut self, coord: TileCoord, compressed: &[u8]) -> Result<()> {
+        match self {
+            ArchiveWriter::Mbtiles(w) => w.write_tile_compressed(coord, compressed),
+            ArchiveWriter::Pmtiles(w) => w.write_tile_compressed(coord, compressed),
+        }
+    }
+
+    /// Flush and finalize the archive.
+    ///
+    /// # Errors
+    /// Propagates the underlying writer's error.
+    pub fn finish(&mut self) -> Result<()> {
+        match self {
+            ArchiveWriter::Mbtiles(w) => TileArchive::finish(w),
+            ArchiveWriter::Pmtiles(w) => w.finish(),
+        }
+    }
+}
 
 use std::io::Write;
 
