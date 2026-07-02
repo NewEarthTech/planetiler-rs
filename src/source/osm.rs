@@ -1,15 +1,17 @@
 //! OpenStreetMap `.osm.pbf` source reader (nodes, ways, relations).
 //!
 //! Two file passes plus a relation-assembly step: pass 1 records every node's
-//! location (the compact in-memory [`NodeLocations`] store), emits tagged nodes
+//! location (a [`NodeStore`] selected via [`NodeStorage`]), emits tagged nodes
 //! as point features, and collects multipolygon/route relation definitions;
-//! pass 2 assembles ways into line/polygon geometry and captures the geometries
-//! of ways that relations reference; then relations are assembled (multipolygon
-//! ring-stitching + hole assignment, route multilinestrings). Features are
-//! pushed to a sink as they are produced ([`stream_osm`]), so the pipeline never
-//! holds them all. The node store is selectable via [`NodeStorage`] — in-RAM by
-//! default, or an off-heap mmap store for planet scale; a compact `sparsearray`
-//! variant is future work.
+//! pass 2 assembles ways into line/polygon geometry (sharing the finished node
+//! store across workers) and captures the geometries of ways that relations
+//! reference; then relations are assembled (multipolygon ring-stitching + hole
+//! assignment, route multilinestrings). Each pass reads blobs sequentially but
+//! decodes them in parallel windows with ordered consumption
+//! ([`for_each_block_parallel`]), so node ids stay ascending and feature
+//! emission stays deterministic while the expensive protobuf/zlib decode uses
+//! every core. Features are pushed to a sink as they are produced
+//! ([`stream_osm`]), so the pipeline never holds them all.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -17,7 +19,8 @@ use std::path::Path;
 use geo_types::{
     Coord, Geometry, LineString, MultiLineString, MultiPolygon, Point, Polygon, coord,
 };
-use osmpbf::{Element, ElementReader, RelMemberType};
+use osmpbf::{Blob, BlobDecode, BlobReader, PrimitiveBlock, RelMemberType};
+use rayon::prelude::*;
 
 use super::{FeatureSink, NodeStorage, SourceFeature};
 use crate::collection::{MmapNodeStore, NodeLocations, NodeStore, SparseNodeStore};
@@ -65,50 +68,53 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
     };
     let mut relations: Vec<PendingRelation> = Vec::new();
     let mut needed_ways: HashSet<i64> = HashSet::new();
-    // osmpbf's `for_each` closure can't return a Result, so capture the first
-    // sink error and skip the rest, then propagate it after the pass.
-    let mut sink_err: Option<Error> = None;
 
     // Pass 1: node locations + point features + relation definitions.
     let pass1_start = std::time::Instant::now();
-    reader(path)?
-        .for_each(|element| match element {
-            Element::Node(node) => {
-                locations.put(node.id(), node.lon(), node.lat());
-                let info = node.info();
-                emit_node(
-                    node.id(),
-                    node.lon(),
-                    node.lat(),
-                    collect_tags(node.tags()),
-                    info.version(),
-                    info.milli_timestamp(),
-                    sink,
-                    &mut sink_err,
-                );
-            }
-            Element::DenseNode(node) => {
-                locations.put(node.id(), node.lon(), node.lat());
-                emit_node(
-                    node.id(),
-                    node.lon(),
-                    node.lat(),
-                    collect_tags(node.tags()),
-                    node.info().map(|i| i.version()),
-                    node.info().map(|i| i.milli_timestamp()),
-                    sink,
-                    &mut sink_err,
-                );
-            }
-            Element::Relation(relation) => {
-                let mut tags = collect_tags(relation.tags());
-                if let Some(kind) = relation_kind(&tags) {
+    for_each_block_parallel(
+        path,
+        |block| {
+            let mut out = NodeBlock::default();
+            for group in block.groups() {
+                for node in group.nodes() {
+                    out.locations.push((node.id(), node.lon(), node.lat()));
+                    let tags = collect_tags(node.tags());
+                    if !tags.is_empty() {
+                        let info = node.info();
+                        out.features.push(node_feature(
+                            node.id(),
+                            node.lon(),
+                            node.lat(),
+                            tags,
+                            info.version(),
+                            info.milli_timestamp(),
+                        ));
+                    }
+                }
+                for node in group.dense_nodes() {
+                    out.locations.push((node.id(), node.lon(), node.lat()));
+                    let tags = collect_tags(node.tags());
+                    if !tags.is_empty() {
+                        out.features.push(node_feature(
+                            node.id(),
+                            node.lon(),
+                            node.lat(),
+                            tags,
+                            node.info().map(|i| i.version()),
+                            node.info().map(|i| i.milli_timestamp()),
+                        ));
+                    }
+                }
+                for relation in group.relations() {
+                    let mut tags = collect_tags(relation.tags());
+                    let Some(kind) = relation_kind(&tags) else {
+                        continue;
+                    };
                     let members: Vec<(i64, bool)> = relation
                         .members()
                         .filter(|m| m.member_type == RelMemberType::Way)
                         .map(|m| (m.member_id, m.role().unwrap_or("") == "inner"))
                         .collect();
-                    needed_ways.extend(members.iter().map(|&(id, _)| id));
                     let info = relation.info();
                     add_metadata(
                         &mut tags,
@@ -117,7 +123,7 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
                         info.version(),
                         info.milli_timestamp(),
                     );
-                    relations.push(PendingRelation {
+                    out.relations.push(PendingRelation {
                         id: relation.id(),
                         kind,
                         tags,
@@ -125,56 +131,75 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
                     });
                 }
             }
-            Element::Way(_) => {}
-        })
-        .map_err(|_| Error::Source("failed to read OSM PBF (node pass)"))?;
-    if let Some(err) = sink_err.take() {
-        return Err(err);
-    }
+            out
+        },
+        |out| {
+            for (id, lon, lat) in out.locations {
+                locations.put(id, lon, lat);
+            }
+            for feature in out.features {
+                sink(feature)?;
+            }
+            for relation in out.relations {
+                needed_ways.extend(relation.members.iter().map(|&(id, _)| id));
+                relations.push(relation);
+            }
+            Ok(())
+        },
+    )?;
     locations.finish()?;
     tracing::info!(
         elapsed_s = pass1_start.elapsed().as_secs_f64(),
         "osm pass 1 (nodes) done"
     );
 
-    // Pass 2: way features + capture member-way geometries for relations.
+    // Pass 2: way features + capture member-way geometries for relations. The
+    // finished node store is shared read-only across the decode workers, so the
+    // per-node location lookups parallelize along with the decode.
     let pass2_start = std::time::Instant::now();
     let mut member_ways: HashMap<i64, Vec<(f64, f64)>> = HashMap::new();
-    reader(path)?
-        .for_each(|element| {
-            if sink_err.is_some() {
-                return;
-            }
-            if let Element::Way(way) = element {
-                let coords: Vec<(f64, f64)> =
-                    way.refs().filter_map(|id| locations.get(id)).collect();
-                if needed_ways.contains(&way.id()) {
-                    member_ways.insert(way.id(), coords.clone());
+    {
+        let store: &dyn NodeStore = &*locations;
+        let needed = &needed_ways;
+        for_each_block_parallel(
+            path,
+            |block| {
+                let mut out = WayBlock::default();
+                for group in block.groups() {
+                    for way in group.ways() {
+                        let coords: Vec<(f64, f64)> =
+                            way.refs().filter_map(|id| store.get(id)).collect();
+                        if needed.contains(&way.id()) {
+                            out.member_ways.push((way.id(), coords.clone()));
+                        }
+                        let mut tags = collect_tags(way.tags());
+                        if tags.is_empty() || coords.len() < 2 {
+                            continue;
+                        }
+                        let info = way.info();
+                        add_metadata(
+                            &mut tags,
+                            way.id(),
+                            "way",
+                            info.version(),
+                            info.milli_timestamp(),
+                        );
+                        if let Some(feature) = way_feature(way.id(), &coords, tags) {
+                            out.features.push(feature);
+                        }
+                    }
                 }
-                let mut tags = collect_tags(way.tags());
-                if tags.is_empty() || coords.len() < 2 {
-                    return;
+                out
+            },
+            |out| {
+                member_ways.extend(out.member_ways);
+                for feature in out.features {
+                    sink(feature)?;
                 }
-                let info = way.info();
-                add_metadata(
-                    &mut tags,
-                    way.id(),
-                    "way",
-                    info.version(),
-                    info.milli_timestamp(),
-                );
-                if let Some(feature) = way_feature(way.id(), &coords, tags)
-                    && let Err(err) = sink(feature)
-                {
-                    sink_err = Some(err);
-                }
-            }
-        })
-        .map_err(|_| Error::Source("failed to read OSM PBF (way pass)"))?;
-    if let Some(err) = sink_err.take() {
-        return Err(err);
+                Ok(())
+            },
+        )?;
     }
-
     tracing::info!(
         elapsed_s = pass2_start.elapsed().as_secs_f64(),
         "osm pass 2 (ways) done"
@@ -219,24 +244,71 @@ pub fn osm_bounds(path: &Path) -> Result<Option<(f64, f64, f64, f64)>> {
     Ok(header.bbox().map(|b| (b.left, b.bottom, b.right, b.top)))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_node(
+/// Decoded output of one pass-1 blob, in element order.
+#[derive(Default)]
+struct NodeBlock {
+    locations: Vec<(i64, f64, f64)>,
+    features: Vec<SourceFeature>,
+    relations: Vec<PendingRelation>,
+}
+
+/// Decoded output of one pass-2 blob, in element order.
+#[derive(Default)]
+struct WayBlock {
+    member_ways: Vec<(i64, Vec<(f64, f64)>)>,
+    features: Vec<SourceFeature>,
+}
+
+/// Read the file's blobs sequentially, decode windows of them across cores, and
+/// hand each block's extracted output to `consume` in file order. The heavy
+/// work (zlib + protobuf decode, tag/geometry extraction) runs in `decode` on
+/// rayon workers; `consume` stays serial and ordered, so node ids reach the
+/// store ascending and feature emission is deterministic. Memory is bounded by
+/// one window of decoded output.
+fn for_each_block_parallel<T, D, C>(path: &Path, decode: D, mut consume: C) -> Result<()>
+where
+    T: Send,
+    D: Fn(&PrimitiveBlock) -> T + Sync,
+    C: FnMut(T) -> Result<()>,
+{
+    const WINDOW: usize = 64;
+    let mut reader =
+        BlobReader::from_path(path).map_err(|_| Error::Source("cannot open OSM PBF"))?;
+    loop {
+        let window: Vec<Blob> = reader
+            .by_ref()
+            .take(WINDOW)
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|_| Error::Source("failed to read OSM PBF"))?;
+        if window.is_empty() {
+            break;
+        }
+        let outputs: Vec<Option<T>> = window
+            .par_iter()
+            .map(|blob| match blob.decode() {
+                Ok(BlobDecode::OsmData(block)) => Ok(Some(decode(&block))),
+                Ok(_) => Ok(None),
+                Err(_) => Err(Error::Source("failed to decode OSM PBF block")),
+            })
+            .collect::<Result<_>>()?;
+        for output in outputs.into_iter().flatten() {
+            consume(output)?;
+        }
+    }
+    Ok(())
+}
+
+/// Build a tagged node's point feature with the osm-qa metadata attached.
+fn node_feature(
     id: i64,
     lon: f64,
     lat: f64,
     mut tags: BTreeMap<String, Value>,
     version: Option<i32>,
     timestamp_millis: Option<i64>,
-    sink: &mut FeatureSink,
-    sink_err: &mut Option<Error>,
-) {
-    if tags.is_empty() || sink_err.is_some() {
-        return;
-    }
+) -> SourceFeature {
     add_metadata(&mut tags, id, "node", version, timestamp_millis);
-    if let Err(err) = sink(point(id, lon, lat, tags)) {
-        *sink_err = Some(err);
-    }
+    point(id, lon, lat, tags)
 }
 
 /// Add the `osm-qa`-style element-metadata attributes (`@id`, `@type`,
@@ -257,10 +329,6 @@ fn add_metadata(
     if let Some(millis) = timestamp_millis {
         tags.insert("@timestamp".to_owned(), Value::Int(millis / 1000));
     }
-}
-
-fn reader(path: &Path) -> Result<ElementReader<std::io::BufReader<std::fs::File>>> {
-    ElementReader::from_path(path).map_err(|_| Error::Source("cannot open OSM PBF"))
 }
 
 fn point(id: i64, lon: f64, lat: f64, tags: BTreeMap<String, Value>) -> SourceFeature {

@@ -363,7 +363,10 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 /// A node id → location store, so the OSM reader can pick a backing strategy at
 /// runtime: [`NodeLocations`] (in-RAM, fast, the default) or [`MmapNodeStore`]
 /// (off-heap, for extracts whose node store would not fit in memory).
-pub trait NodeStore {
+///
+/// `Send + Sync` so the way pass can share the finished store across decode
+/// workers (`get` is `&self`).
+pub trait NodeStore: Send + Sync {
     /// Record a node's location.
     fn put(&mut self, id: i64, lon: f64, lat: f64);
     /// Finalize for lookups.
