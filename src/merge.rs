@@ -1,12 +1,17 @@
 //! Tile-space feature post-processing, mirroring upstream `FeatureMerge`.
 //!
 //! Utilities for [`Profile::post_process_layer`](crate::profile::Profile::post_process_layer):
-//! today [`merge_line_strings`] — group linestring features by attributes,
-//! stitch touching segments end-to-end, drop merged lines below a minimum
-//! length, and trim detail outside the tile buffer. Polygon dissolve
-//! (`mergeOverlappingPolygons`) arrives with a boolean-ops dependency later.
+//! [`merge_line_strings`] — group linestring features by attributes, stitch
+//! touching segments end-to-end, drop merged lines below a minimum length,
+//! and trim detail outside the tile buffer; and
+//! [`merge_overlapping_polygons`] — dissolve same-attribute polygons into
+//! fewer polygons covering the same area (union via `geo`'s boolean ops),
+//! dropping results below a minimum area.
 
 use std::collections::{HashMap, VecDeque};
+
+use geo::BooleanOps;
+use geo_types::{Coord, LineString, MultiPolygon, Polygon};
 
 use crate::mvt::{Feature, Geometry};
 
@@ -82,6 +87,145 @@ pub fn merge_line_strings(
         }
     }
     result
+}
+
+/// Dissolve a tile layer's polygon features that share identical attributes:
+/// overlapping or touching polygons are unioned into fewer polygons covering
+/// the same area, and result polygons with area below `min_area_px2` (square
+/// pixels; `0` keeps all) are dropped. Non-polygon features pass through
+/// unchanged in their original order, followed by one merged feature per
+/// attribute group (ordered by first appearance), carrying the group's first
+/// feature id — the analog of upstream's `mergeOverlappingPolygons`.
+pub fn merge_overlapping_polygons(
+    features: Vec<Feature>,
+    min_area_px2: f64,
+    extent: u32,
+) -> Vec<Feature> {
+    let units = f64::from(extent) / TILE_PIXELS;
+    let min_area = min_area_px2 * units * units;
+
+    let mut result: Vec<Feature> = Vec::with_capacity(features.len());
+    let mut groups: Vec<(Feature, Vec<Polygon<f64>>)> = Vec::new();
+    let mut group_index: HashMap<String, usize> = HashMap::new();
+    for feature in features {
+        match feature.geometry {
+            Geometry::Polygons(ref rings) => {
+                let polygons = rings_to_geo(rings);
+                let key = format!("{:?}", feature.attributes);
+                match group_index.get(&key) {
+                    Some(&i) => groups[i].1.extend(polygons),
+                    None => {
+                        group_index.insert(key, groups.len());
+                        groups.push((feature, polygons));
+                    }
+                }
+            }
+            _ => result.push(feature),
+        }
+    }
+
+    for (prototype, polygons) in groups {
+        if polygons.is_empty() {
+            continue;
+        }
+        let mut union = MultiPolygon(Vec::new());
+        for polygon in &polygons {
+            union = union.union(&MultiPolygon(vec![polygon.clone()]));
+        }
+        let rings = geo_to_rings(&union, min_area);
+        if !rings.is_empty() {
+            result.push(Feature {
+                id: prototype.id,
+                geometry: Geometry::Polygons(rings),
+                attributes: prototype.attributes,
+            });
+        }
+    }
+    result
+}
+
+/// Interpret a flat MVT ring list (winding conveys nesting: positive shoelace
+/// = exterior, negative = hole of the preceding exterior) as `geo` polygons.
+fn rings_to_geo(rings: &[Vec<(i32, i32)>]) -> Vec<Polygon<f64>> {
+    let mut polygons: Vec<Polygon<f64>> = Vec::new();
+    for ring in rings {
+        if ring.len() < 3 {
+            continue;
+        }
+        let line = LineString(
+            ring.iter()
+                .map(|&(x, y)| Coord {
+                    x: f64::from(x),
+                    y: f64::from(y),
+                })
+                .collect(),
+        );
+        if signed_area2(ring) >= 0 {
+            polygons.push(Polygon::new(line, vec![]));
+        } else if let Some(last) = polygons.last_mut() {
+            last.interiors_push(line);
+        }
+    }
+    polygons
+}
+
+/// Convert unioned `geo` polygons back to a flat MVT ring list, rounding to
+/// the integer grid, restoring the winding convention (exterior positive,
+/// holes negative), and dropping polygons below `min_area` (tile units²) or
+/// rings that degenerate under rounding.
+fn geo_to_rings(union: &MultiPolygon<f64>, min_area: f64) -> Vec<Vec<(i32, i32)>> {
+    let round_ring = |line: &LineString<f64>| -> Vec<(i32, i32)> {
+        let mut ring: Vec<(i32, i32)> = line
+            .0
+            .iter()
+            .map(|c| (c.x.round() as i32, c.y.round() as i32))
+            .collect();
+        if ring.len() >= 2 && ring.first() == ring.last() {
+            ring.pop(); // rings are stored open
+        }
+        ring.dedup();
+        ring
+    };
+
+    let mut rings = Vec::new();
+    for polygon in &union.0 {
+        let mut exterior = round_ring(polygon.exterior());
+        if exterior.len() < 3 {
+            continue;
+        }
+        let area2 = signed_area2(&exterior);
+        if min_area > 0.0 && (area2.abs() as f64) / 2.0 < min_area {
+            continue;
+        }
+        if area2 < 0 {
+            exterior.reverse();
+        }
+        rings.push(exterior);
+        for interior in polygon.interiors() {
+            let mut hole = round_ring(interior);
+            if hole.len() < 3 {
+                continue;
+            }
+            if signed_area2(&hole) > 0 {
+                hole.reverse();
+            }
+            rings.push(hole);
+        }
+    }
+    rings
+}
+
+/// Twice the signed shoelace area of an open integer ring. Positive =
+/// clockwise in Y-down tile space = an MVT exterior; negative = a hole.
+fn signed_area2(ring: &[(i32, i32)]) -> i64 {
+    let n = ring.len();
+    let mut area: i64 = 0;
+    for i in 0..n {
+        let (x1, y1) = ring[i];
+        let (x2, y2) = ring[(i + 1) % n];
+        area += i64::from(x1) * i64::from(y2) - i64::from(x2) * i64::from(y1);
+    }
+    area
 }
 
 /// Stitch open paths end-to-end wherever endpoints coincide exactly (merged
@@ -263,6 +407,92 @@ mod tests {
         // 100 units = 6.25 px at extent 4096; a 10 px minimum drops it.
         let features = vec![line(1, vec![vec![(0, 0), (100, 0)]], "road")];
         assert!(merge_line_strings(features, 10.0, -1.0, 4096).is_empty());
+    }
+
+    fn polygon(id: u64, rings: Vec<Vec<(i32, i32)>>, attr: &str) -> Feature {
+        Feature {
+            id,
+            geometry: Geometry::Polygons(rings),
+            attributes: BTreeMap::from([("kind".to_owned(), Value::from(attr))]),
+        }
+    }
+
+    /// Axis-aligned square with positive (exterior) winding.
+    fn square(x: i32, y: i32, size: i32) -> Vec<(i32, i32)> {
+        vec![(x, y), (x + size, y), (x + size, y + size), (x, y + size)]
+    }
+
+    fn total_area2(feature: &Feature) -> i64 {
+        match &feature.geometry {
+            Geometry::Polygons(rings) => rings.iter().map(|r| signed_area2(r)).sum(),
+            other => panic!("expected polygons, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overlapping_same_attribute_squares_dissolve() {
+        let features = vec![
+            polygon(1, vec![square(0, 0, 100)], "water"),
+            polygon(2, vec![square(50, 50, 100)], "water"),
+        ];
+        let merged = merge_overlapping_polygons(features, 0.0, 4096);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].id, 1);
+        // Union area: 100² + 100² − 50² overlap = 17500 (×2 for shoelace).
+        assert_eq!(total_area2(&merged[0]), 2 * 17500);
+    }
+
+    #[test]
+    fn disjoint_same_attribute_polygons_become_one_multipolygon() {
+        let features = vec![
+            polygon(1, vec![square(0, 0, 100)], "water"),
+            polygon(2, vec![square(500, 500, 100)], "water"),
+        ];
+        let merged = merge_overlapping_polygons(features, 0.0, 4096);
+        assert_eq!(merged.len(), 1);
+        match &merged[0].geometry {
+            Geometry::Polygons(rings) => {
+                assert_eq!(rings.len(), 2);
+                assert!(rings.iter().all(|r| signed_area2(r) > 0));
+            }
+            other => panic!("expected polygons, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn different_attribute_polygons_stay_separate() {
+        let features = vec![
+            polygon(1, vec![square(0, 0, 100)], "water"),
+            polygon(2, vec![square(50, 50, 100)], "park"),
+        ];
+        let merged = merge_overlapping_polygons(features, 0.0, 4096);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn drops_polygons_below_min_area() {
+        // 10×10 units = 100 units² < 1 px² (256 units² at extent 4096).
+        let features = vec![polygon(1, vec![square(0, 0, 10)], "water")];
+        assert!(merge_overlapping_polygons(features, 1.0, 4096).is_empty());
+    }
+
+    #[test]
+    fn holes_survive_the_round_trip() {
+        let mut hole = square(100, 100, 200);
+        hole.reverse(); // negative winding = hole
+        let features = vec![polygon(1, vec![square(0, 0, 400), hole], "water")];
+        let merged = merge_overlapping_polygons(features, 0.0, 4096);
+        assert_eq!(merged.len(), 1);
+        match &merged[0].geometry {
+            Geometry::Polygons(rings) => {
+                assert_eq!(rings.len(), 2, "outer + hole: {rings:?}");
+                assert!(signed_area2(&rings[0]) > 0);
+                assert!(signed_area2(&rings[1]) < 0);
+            }
+            other => panic!("expected polygons, got {other:?}"),
+        }
+        // Net area: 400² − 200² = 120000 (×2 for shoelace).
+        assert_eq!(total_area2(&merged[0]), 2 * 120_000);
     }
 
     #[test]
