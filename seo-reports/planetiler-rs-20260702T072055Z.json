@@ -1,0 +1,290 @@
+{
+  "surface": {
+    "id": "planetiler-rs",
+    "url": "https://github.com/johncarmack1984/planetiler-rs",
+    "kind": "site",
+    "gsc_property": null,
+    "github_repo": "johncarmack1984/planetiler-rs",
+    "positioning": "planetiler-rs is a Rust port of Planetiler (Java): OSM .osm.pbf to MBTiles vector-tile generation in a fraction of the memory, benchmarked head-to-head against pinned upstream with committed results; going public as a portfolio OSS repo; surfaces are the GitHub repo (and crates.io if published).",
+    "seed_keywords": [],
+    "surface_markers": [],
+    "namesake_markers": [],
+    "geo_probes": [],
+    "cite_domains": []
+  },
+  "results": [
+    {
+      "provider": "crawl",
+      "tier": 0,
+      "status": "ok",
+      "signals": [
+        {
+          "key": "final_url",
+          "value": "https://github.com/johncarmack1984/planetiler-rs",
+          "note": ""
+        },
+        {
+          "key": "status",
+          "value": 404,
+          "note": ""
+        },
+        {
+          "key": "title",
+          "value": "Page not found \u00b7 GitHub \u00b7 GitHub",
+          "note": ""
+        },
+        {
+          "key": "title_len",
+          "value": 32,
+          "note": ""
+        },
+        {
+          "key": "meta_description",
+          "value": "GitHub is where people build software. More than 150 million people use GitHub to discover, fork, and contribute to over 420 million projects.",
+          "note": ""
+        },
+        {
+          "key": "canonical",
+          "value": "https://github.com/johncarmack1984/planetiler-rs",
+          "note": ""
+        },
+        {
+          "key": "html_lang",
+          "value": "en",
+          "note": ""
+        },
+        {
+          "key": "og_tags",
+          "value": 16,
+          "note": ""
+        },
+        {
+          "key": "twitter_tags",
+          "value": 0,
+          "note": ""
+        },
+        {
+          "key": "h1_raw",
+          "value": [
+            "Search code, repositories, users, issues, pull requests...",
+            "Provide feedback",
+            "Saved searches"
+          ],
+          "note": ""
+        },
+        {
+          "key": "raw_html_words",
+          "value": 498,
+          "note": ""
+        },
+        {
+          "key": "jsonld_types_raw",
+          "value": [],
+          "note": ""
+        },
+        {
+          "key": "rendered",
+          "value": "skipped (install 'render' extra for the JS-gap)",
+          "note": ""
+        },
+        {
+          "key": "robots_txt",
+          "value": "ok",
+          "note": ""
+        },
+        {
+          "key": "sitemap_xml",
+          "value": "406",
+          "note": ""
+        }
+      ],
+      "findings": [
+        {
+          "severity": "high",
+          "code": "schema.missing",
+          "message": "No JSON-LD structured data in server HTML (no Person/ProfilePage entity for Google or LLMs)."
+        },
+        {
+          "severity": "low",
+          "code": "robots.no_sitemap",
+          "message": "robots.txt does not reference a sitemap."
+        },
+        {
+          "severity": "medium",
+          "code": "sitemap.missing",
+          "message": "No /sitemap.xml (200)."
+        }
+      ],
+      "error": null,
+      "stub_adds": null,
+      "stub_env": [],
+      "stub_contract": null
+    },
+    {
+      "provider": "psi",
+      "tier": 0,
+      "status": "error",
+      "signals": [],
+      "findings": [],
+      "error": "HTTPStatusError: Server error '500 Internal Server Error' for url 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=https%3A%2F%2Fgithub.com%2Fjohncarmack1984%2Fplanetiler-rs&key=REDACTED&strategy=mobile&category=PERFORMANCE'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500",
+      "stub_adds": null,
+      "stub_env": [],
+      "stub_contract": null
+    },
+    {
+      "provider": "gsc",
+      "tier": 0,
+      "status": "skipped",
+      "signals": [],
+      "findings": [
+        {
+          "severity": "low",
+          "code": "gsc.no_property",
+          "message": "surface has no gsc_property set."
+        }
+      ],
+      "error": null,
+      "stub_adds": null,
+      "stub_env": [],
+      "stub_contract": null
+    },
+    {
+      "provider": "github",
+      "tier": 0,
+      "status": "ok",
+      "signals": [
+        {
+          "key": "description",
+          "value": "A Rust port of Planetiler: fast, low-memory vector tile generation from OpenStreetMap and other geodata",
+          "note": ""
+        },
+        {
+          "key": "topics",
+          "value": [
+            "geospatial",
+            "gis",
+            "maps",
+            "mbtiles",
+            "mvt",
+            "openstreetmap",
+            "osm",
+            "planetiler",
+            "rust",
+            "vector-tiles"
+          ],
+          "note": ""
+        },
+        {
+          "key": "stars",
+          "value": 0,
+          "note": ""
+        },
+        {
+          "key": "homepage",
+          "value": null,
+          "note": ""
+        },
+        {
+          "key": "views_14d",
+          "value": 0,
+          "note": ""
+        },
+        {
+          "key": "uniques_14d",
+          "value": 0,
+          "note": ""
+        }
+      ],
+      "findings": [],
+      "error": null,
+      "stub_adds": null,
+      "stub_env": [],
+      "stub_contract": null
+    },
+    {
+      "provider": "bing",
+      "tier": 0,
+      "status": "ok",
+      "signals": [
+        {
+          "key": "bing",
+          "value": "HTTP 400",
+          "note": ""
+        }
+      ],
+      "findings": [
+        {
+          "severity": "low",
+          "code": "bing.error",
+          "message": "Bing API returned 400 (is the site verified for this key?)."
+        }
+      ],
+      "error": null,
+      "stub_adds": null,
+      "stub_env": [],
+      "stub_contract": null
+    },
+    {
+      "provider": "trends",
+      "tier": 0,
+      "status": "skipped",
+      "signals": [],
+      "findings": [
+        {
+          "severity": "low",
+          "code": "trends.no_seeds",
+          "message": "surface has no seed_keywords."
+        }
+      ],
+      "error": null,
+      "stub_adds": null,
+      "stub_env": [],
+      "stub_contract": null
+    },
+    {
+      "provider": "dataforseo",
+      "tier": 1,
+      "status": "skipped",
+      "signals": [],
+      "findings": [],
+      "error": null,
+      "stub_adds": null,
+      "stub_env": [],
+      "stub_contract": null
+    },
+    {
+      "provider": "serper",
+      "tier": 1,
+      "status": "skipped",
+      "signals": [],
+      "findings": [
+        {
+          "severity": "low",
+          "code": "serper.no_seeds",
+          "message": "surface has no seed_keywords; skipping."
+        }
+      ],
+      "error": null,
+      "stub_adds": null,
+      "stub_env": [],
+      "stub_contract": null
+    },
+    {
+      "provider": "geo_probe",
+      "tier": 2,
+      "status": "skipped",
+      "signals": [],
+      "findings": [
+        {
+          "severity": "low",
+          "code": "geo.no_config",
+          "message": "set surface_markers + geo_probes on the surface (surfaces.toml) to run GEO probes; skipping."
+        }
+      ],
+      "error": null,
+      "stub_adds": null,
+      "stub_env": [],
+      "stub_contract": null
+    }
+  ]
+}

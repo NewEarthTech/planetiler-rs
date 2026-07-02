@@ -41,11 +41,11 @@ cargo build --release
 
 GeoJSON sources work too (`--source features.geojson`). The flags you'll actually reach for:
 
-- `--storage ram|mmap|sparse` — node-location store. `ram` is the fast default. `sparse` streams a run-compressed store to disk and memory-maps it: the planet-scale path, and the one in the table above.
-- `--bounds w,s,e,n` — clip tile output. Defaults to the pbf's header bbox (like Planetiler); `--bounds world` disables.
-- `--max-features-per-tile N` — cap features per tile layer. `0` (default) keeps everything; at country scale with low zooms, an uncapped z0 tile will eat your RAM for breakfast (we measured 59 GB; capped, 5.9 GB).
-- `--sort-memory-mb` — external-sort budget before spilling to disk (default 256). We measured 256 MB vs 16 GB: same wall time. Spill I/O is cheap; don't spend RAM here expecting speed.
-- `--min-size`, `--simplify`, `--buffer` — per-zoom feature filtering, Douglas-Peucker tolerance (px), tile buffer.
+- `--storage ram|mmap|sparse`: node-location store. `ram` is the fast default. `sparse` streams a run-compressed store to disk and memory-maps it: the planet-scale path, and the one in the table above.
+- `--bounds w,s,e,n`: clip tile output. Defaults to the pbf's header bbox (like Planetiler); `--bounds world` disables.
+- `--max-features-per-tile N`: cap features per tile layer. `0` (default) keeps everything; at country scale with low zooms, an uncapped z0 tile will eat your RAM for breakfast (we measured 59 GB; capped, 5.9 GB).
+- `--sort-memory-mb`: external-sort budget before spilling to disk (default 256). We measured 256 MB vs 16 GB: same wall time. Spill I/O is cheap; don't spend RAM here expecting speed.
+- `--min-size`, `--simplify`, `--buffer`: per-zoom feature filtering, Douglas-Peucker tolerance (px), tile buffer.
 
 ## The harness
 
@@ -67,3 +67,9 @@ cargo run --release --bin bench -- render 12 2132 1493 out.svg ours.mbtiles thei
 ## Design, briefly
 
 Streaming source → profile → render (project, slice into covering tiles, clip, quantize) → external merge sort keyed by tile → group → MVT encode + gzip → MBTiles. Peak memory is bounded by one render batch, the sort buffer, the node store you chose, and one decode window: never the whole input, never all the tiles. PBF blocks decode in parallel windows with ordered consumption, so output is deterministic down to the byte across every storage mode and thread count. `docs/ARCHITECTURE.md` has the long version.
+
+## License
+
+Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your option. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+
+Planetiler itself is [Apache-2.0](https://github.com/onthegomap/planetiler/blob/main/LICENSE); this is an independent implementation that follows its behavior, with upstream pinned as the benchmark reference.
