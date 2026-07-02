@@ -18,6 +18,7 @@ mod simplify;
 use std::collections::BTreeMap;
 
 use geo_types::{Coord, Geometry, LineString, Polygon};
+use rayon::prelude::*;
 
 use crate::geom::{TileCoord, lng_lat_to_world};
 use crate::model::Value;
@@ -135,19 +136,36 @@ fn render_at_zoom(
     }
 
     let rect = Rect::new(-buffer, -buffer, extent + buffer, extent + buffer);
-    for tx in tx0..=tx1 {
-        for ty in ty0..=ty1 {
-            let Some(tile_geometry) = clip_to_tile(&geometry, tx, ty, extent, &rect) else {
-                continue;
-            };
-            out.push(RenderedFeature {
-                coord: TileCoord::new(z, tx, ty).expect("tile in range"),
-                layer: feature.layer.clone(),
-                zorder: feature.zorder,
-                id: feature.id,
-                geometry: tile_geometry,
-                attrs: feature.attrs.clone(),
-            });
+    let make = |tx: u32, ty: u32| {
+        clip_to_tile(&geometry, tx, ty, extent, &rect).map(|tile_geometry| RenderedFeature {
+            coord: TileCoord::new(z, tx, ty).expect("tile in range"),
+            layer: feature.layer.clone(),
+            zorder: feature.zorder,
+            id: feature.id,
+            geometry: tile_geometry,
+            attrs: feature.attrs.clone(),
+        })
+    };
+
+    // A giant feature (admin boundary, coastline) can cover thousands of tiles
+    // at high zoom; clipping them serially leaves one rayon task hogging a core
+    // while the rest idle. Above a threshold, clip across cores (nested rayon
+    // composes with the per-feature parallelism via work stealing). The ordered
+    // collect keeps output identical to the serial loop.
+    const PARALLEL_TILE_THRESHOLD: u64 = 256;
+    let tile_count = u64::from(tx1 - tx0 + 1) * u64::from(ty1 - ty0 + 1);
+    if tile_count >= PARALLEL_TILE_THRESHOLD {
+        let coords: Vec<(u32, u32)> = (tx0..=tx1)
+            .flat_map(|tx| (ty0..=ty1).map(move |ty| (tx, ty)))
+            .collect();
+        out.par_extend(coords.into_par_iter().filter_map(|(tx, ty)| make(tx, ty)));
+    } else {
+        for tx in tx0..=tx1 {
+            for ty in ty0..=ty1 {
+                if let Some(rendered) = make(tx, ty) {
+                    out.push(rendered);
+                }
+            }
         }
     }
 }
