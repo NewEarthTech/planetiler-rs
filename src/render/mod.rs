@@ -106,12 +106,20 @@ fn render_at_zoom(
     let extent = f64::from(options.extent);
     let px = extent / TILE_PIXELS; // tile-extent units per screen pixel
 
+    // Zoom-dependent thresholds, matching Planetiler: the configured values
+    // apply below max zoom; at max zoom both drop to 1/16 px so the final
+    // zoom's tiles keep nearly full detail.
+    const AT_MAX_ZOOM_PX: f64 = 256.0 / 4096.0;
+    let (simplify_px, min_size_px) = if z == options.max_zoom {
+        (AT_MAX_ZOOM_PX, AT_MAX_ZOOM_PX)
+    } else {
+        (options.simplify_tolerance_px, options.min_size_px)
+    };
+
     // World -> this zoom's global tile-extent space.
     let mut geometry = scale_geometry(world, n * extent);
-    if options.simplify_tolerance_px > 0.0 {
-        simplify_geometry(&mut geometry, options.simplify_tolerance_px * px);
-    }
-    if options.min_size_px > 0.0 && feature_pixel_size(&geometry, px) < options.min_size_px {
+    simplify_geometry(&mut geometry, simplify_px * px);
+    if !filter_min_size(&mut geometry, min_size_px * px) {
         return;
     }
 
@@ -236,17 +244,30 @@ fn scale_geometry(geometry: &RenderGeometry, scale: f64) -> RenderGeometry {
 }
 
 fn simplify_geometry(geometry: &mut RenderGeometry, tolerance: f64) {
+    if tolerance < 0.0 {
+        return;
+    }
     match geometry {
         RenderGeometry::Points(_) => {}
         RenderGeometry::Lines(lines) => {
             for line in lines.iter_mut() {
-                *line = simplify::simplify(line, tolerance);
+                *line = simplify::simplify(line, tolerance, false);
             }
         }
         RenderGeometry::Polygons(polygons) => {
             for rings in polygons.iter_mut() {
                 for ring in rings.iter_mut() {
-                    *ring = simplify::simplify(ring, tolerance);
+                    // Upstream simplifies rings in closed form (first == last)
+                    // with anti-collapse; our rings are stored open.
+                    let mut closed = std::mem::take(ring);
+                    if !closed.is_empty() && closed.first() != closed.last() {
+                        closed.push(closed[0]);
+                    }
+                    let mut simplified = simplify::simplify(&closed, tolerance, true);
+                    if simplified.len() >= 2 && simplified.first() == simplified.last() {
+                        simplified.pop();
+                    }
+                    *ring = simplified;
                 }
             }
         }
@@ -255,17 +276,30 @@ fn simplify_geometry(geometry: &mut RenderGeometry, tolerance: f64) {
 
 /// The feature's representative on-screen size in pixels (line length, or
 /// `sqrt(area)` for polygons). Points are treated as always large enough.
-fn feature_pixel_size(geometry: &RenderGeometry, px: f64) -> f64 {
+/// Apply Planetiler's min-size semantics in place: line parts shorter than
+/// `min_units` and polygon rings with area below `min_units²` are dropped
+/// (holes included; points are never filtered). Returns `false` when nothing
+/// survives.
+fn filter_min_size(geometry: &mut RenderGeometry, min_units: f64) -> bool {
+    if min_units <= 0.0 {
+        return true;
+    }
     match geometry {
-        RenderGeometry::Points(_) => f64::INFINITY,
-        RenderGeometry::Lines(lines) => lines.iter().map(|l| path_length(l)).sum::<f64>() / px,
+        RenderGeometry::Points(_) => true,
+        RenderGeometry::Lines(lines) => {
+            lines.retain(|line| path_length(line) >= min_units);
+            !lines.is_empty()
+        }
         RenderGeometry::Polygons(polygons) => {
-            let area: f64 = polygons
-                .iter()
-                .filter_map(|rings| rings.first())
-                .map(|r| ring_area(r).abs())
-                .sum();
-            area.sqrt() / px
+            let min_area = min_units * min_units;
+            polygons.retain_mut(|rings| match rings.first() {
+                Some(outer) if ring_area(outer).abs() >= min_area => {
+                    rings.retain(|ring| ring_area(ring).abs() >= min_area);
+                    true
+                }
+                _ => false,
+            });
+            !polygons.is_empty()
         }
     }
 }
@@ -572,7 +606,14 @@ mod tests {
             coords.push(coord! {x: lng, y: lat});
         }
         let f = feature(Geometry::LineString(LineString(coords)), 6, 6);
-        let plain = render_feature(&f, &opts(0, 14));
+        // Tolerance below 0 is passthrough (0 is active, like upstream).
+        let plain = render_feature(
+            &f,
+            &RenderOptions {
+                simplify_tolerance_px: -1.0,
+                ..opts(0, 14)
+            },
+        );
         let simplified = render_feature(
             &f,
             &RenderOptions {

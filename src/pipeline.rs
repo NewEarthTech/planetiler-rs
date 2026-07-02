@@ -67,7 +67,7 @@ impl Default for GenerateOptions {
             buffer: 64.0,
             compression: TileCompression::Gzip,
             min_size_px: 1.0,
-            simplify_tolerance_px: 0.0,
+            simplify_tolerance_px: 0.1,
             bounds: None,
             sort_memory_bytes: 64 << 20,
             max_features_per_tile: 0,
