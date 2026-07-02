@@ -49,7 +49,21 @@ Near-identical output (21472 vs 21340 tiles, 0.6%). The honest verdict at countr
 
 **Sort-buffer sweep (falsifies the "we're slow because we're frugal" hypothesis):** raising `--sort-memory-mb` from 256 MB to 4 GB / 16 GB (and pairing 16 GB with the ram node store) left wall time flat — 332 s / 332 s / 328 s / 330 s — while RSS climbed to 9–11 GB. Spending 2.5× the memory bought back nothing: sort-spill I/O is cheap (sequential SSD), so the 4× time gap is **compute throughput** in read → render → encode.
 
-**Phase breakdown + first optimization round (GB z12, phase timers):** baseline split was pass1 nodes 57 s / pass2 ways 129 s / **relations ~154 s (41%!)** / write 36 s. The relation tail had two causes — `assemble_rings` was O(n²) (linear scan per fragment; GB admin boundaries have thousands of member ways) and a giant feature covering thousands of tiles clipped as a *single* rayon task. Fixing both (endpoint-hash O(n) stitching; per-tile parallel clipping above 256 covering tiles) cut the tail **154 → ~28 s** and total wall **332 → ~250 s (25%)**, output verified byte-identical (same entries/features/tiles; monaco 102/102 identical). Gap vs Java now ~3.1×; the remaining fat is the **single-threaded, twice-scanned PBF decode** (pass1+pass2 ≈ 190 s of 250) — parallel block decode is the next lever.
+**Phase breakdown + optimization rounds (GB z12, phase timers):** baseline split was pass1 nodes 57 s / pass2 ways 129 s / **relations ~154 s (41%!)** / write 36 s.
+
+| phase | baseline | + relation fixes | + parallel decode |
+|---|---|---|---|
+| pass 1 nodes | 57 s | 53 s | **22 s** |
+| pass 2 ways | 129 s | 136 s | **66 s** |
+| relations | ~154 s | ~28 s | ~27 s |
+| merge+encode+write | 36 s | 36 s | 37 s |
+| **total** | **332 s** | **~250 s** | **153 s** |
+
+- **Round 1 — relation tail (332→250 s):** `assemble_rings` was O(n²) (linear scan per fragment; GB admin boundaries have thousands of member ways) → endpoint-hash O(n) stitching; and a giant feature covering thousands of tiles clipped as a *single* rayon task → per-tile parallel clipping above 256 covering tiles.
+- **Round 2 — parallel PBF decode (250→153 s):** both passes decoded the file single-threaded (`osmpbf::for_each`), twice. Blobs are now read sequentially but decoded in parallel windows of 64 with ordered consumption — node ids stay ascending (the sparse store's invariant), feature emission stays deterministic, and the way pass shares the finished node store read-only across workers so location lookups parallelize too.
+- **Every round verified byte-identical** (same entries/features/tiles on GB: 24638633 / 43348118 / 21472; monaco 102/102).
+
+**Net: the time gap vs Planetiler fell 4.1× → 1.9×** (153 s vs 81 s) **at ~5× less memory** (5.8 GB vs 29.1 GB). Remaining fat: pass 2's serial consume between decode windows (~66 s), the relation stage (~27 s), and the write stage (~37 s) — pipelining decode/consume overlap is the next candidate.
 
 ## Output parity (monaco, z12-14, via `bench compare`)
 
