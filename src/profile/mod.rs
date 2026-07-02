@@ -2,13 +2,16 @@
 //!
 //! A [`Profile`] is the user-facing schema: it turns each [`SourceFeature`] into
 //! zoom-ranged vector features via a [`FeatureCollector`]. Profiles work purely
-//! in lon/lat world geometry and `model` types — they never see tile space or
-//! the renderer.
+//! in lon/lat world geometry and `model` types, with one deliberate exception:
+//! [`Profile::post_process_layer`] mirrors upstream's
+//! `postProcessLayerFeatures` and operates on a finished tile layer in tile
+//! space (merging lines, dissolving polygons — see [`crate::merge`]).
 
 mod collector;
 
 pub use collector::{FeatureCollector, VectorFeature};
 
+use crate::mvt;
 use crate::source::SourceFeature;
 
 /// A schema that maps source features to output vector features.
@@ -19,6 +22,21 @@ pub trait Profile {
     /// Profile name, used for archive metadata.
     fn name(&self) -> &str {
         "planetiler-rs"
+    }
+
+    /// Post-process one tile layer's features just before encoding — the hook
+    /// for [`crate::merge`] utilities (line merging, polygon dissolve, feature
+    /// dropping). Runs once per non-empty layer per tile with the features in
+    /// draw order; the default returns them unchanged. This is the one Profile
+    /// method that sees tile-space geometry.
+    fn post_process_layer(
+        &self,
+        layer: &str,
+        zoom: u8,
+        features: Vec<mvt::Feature>,
+    ) -> Vec<mvt::Feature> {
+        let _ = (layer, zoom);
+        features
     }
 }
 

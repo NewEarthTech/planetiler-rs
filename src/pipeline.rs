@@ -152,6 +152,7 @@ where
     let tiles = write_sorted_tiles(
         sort,
         &registry,
+        profile,
         options.extent,
         options.compression,
         options.max_features_per_tile,
@@ -230,6 +231,7 @@ fn flush_render_batch(
 fn write_sorted_tiles(
     sort: ExternalMergeSort,
     registry: &LayerRegistry,
+    profile: &dyn Profile,
     extent: u32,
     compression: TileCompression,
     max_features_per_tile: usize,
@@ -243,14 +245,20 @@ fn write_sorted_tiles(
     let mut batch: Vec<(TileCoord, mvt::Tile)> = Vec::new();
 
     let finalize = |coord: TileCoord, layers: &mut BTreeMap<u8, Vec<mvt::Feature>>| {
-        let mvt_layers = std::mem::take(layers)
+        let mvt_layers: Vec<mvt::Layer> = std::mem::take(layers)
             .into_iter()
-            .map(|(index, features)| mvt::Layer {
-                name: registry.name(index).to_owned(),
-                version: 2,
-                extent,
-                features,
+            .map(|(index, features)| {
+                let name = registry.name(index);
+                // The profile's tile-space hook (line merging, dissolve, drops).
+                let features = profile.post_process_layer(name, coord.z(), features);
+                mvt::Layer {
+                    name: name.to_owned(),
+                    version: 2,
+                    extent,
+                    features,
+                }
             })
+            .filter(|layer| !layer.features.is_empty())
             .collect();
         (coord, mvt::Tile { layers: mvt_layers })
     };
@@ -260,7 +268,10 @@ fn write_sorted_tiles(
         let tile = entry.key.tile();
         if current != Some(tile) {
             if let Some(previous) = current.take() {
-                batch.push(finalize(previous, &mut layers));
+                let (coord, tile_data) = finalize(previous, &mut layers);
+                if !tile_data.layers.is_empty() {
+                    batch.push((coord, tile_data));
+                }
                 if batch.len() >= WRITE_BATCH {
                     flush_batch(&mut batch, compression, writer, &mut tiles_written)?;
                 }
@@ -284,7 +295,10 @@ fn write_sorted_tiles(
         });
     }
     if let Some(previous) = current.take() {
-        batch.push(finalize(previous, &mut layers));
+        let (coord, tile_data) = finalize(previous, &mut layers);
+        if !tile_data.layers.is_empty() {
+            batch.push((coord, tile_data));
+        }
     }
     flush_batch(&mut batch, compression, writer, &mut tiles_written)?;
     if dropped > 0 {
@@ -671,5 +685,75 @@ mod tests {
             10,
             "cap bounds the tile layer"
         );
+    }
+
+    #[test]
+    fn post_process_layer_hook_merges_lines() {
+        use geo_types::{LineString, coord};
+
+        use crate::profile::FeatureCollector;
+
+        struct MergingProfile;
+        impl Profile for MergingProfile {
+            fn process_feature(&self, _source: &SourceFeature, features: &mut FeatureCollector) {
+                features.add_all_tags("roads");
+            }
+            fn post_process_layer(
+                &self,
+                _layer: &str,
+                _zoom: u8,
+                features: Vec<mvt::Feature>,
+            ) -> Vec<mvt::Feature> {
+                crate::merge::merge_line_strings(features, 0.0, -1.0, 4096)
+            }
+        }
+
+        // Two touching lines with identical tags, inside the single z0 tile.
+        let road = |id: u64, from: (f64, f64), to: (f64, f64)| {
+            let (ax, ay) = world_to_lng_lat(from.0, from.1);
+            let (bx, by) = world_to_lng_lat(to.0, to.1);
+            SourceFeature {
+                id,
+                geometry: Geometry::LineString(LineString(vec![
+                    coord! {x: ax, y: ay},
+                    coord! {x: bx, y: by},
+                ])),
+                tags: BTreeMap::from([("kind".to_owned(), Value::from("road"))]),
+            }
+        };
+        let features = vec![
+            road(1, (0.4, 0.5), (0.5, 0.5)),
+            road(2, (0.5, 0.5), (0.6, 0.5)),
+        ];
+        let options = GenerateOptions {
+            min_zoom: 0,
+            max_zoom: 0,
+            ..Default::default()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("merged.mbtiles");
+        generate(&features, &MergingProfile, &options, &path).unwrap();
+
+        let conn = Connection::open(&path).unwrap();
+        let blob: Vec<u8> = conn
+            .query_row("select tile_data from tiles limit 1", [], |r| r.get(0))
+            .unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(blob.as_slice());
+        let mut raw = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut raw).unwrap();
+        let tile = decode_tile(&raw).unwrap();
+        let layer = tile.layers.iter().find(|l| l.name == "roads").unwrap();
+        assert_eq!(
+            layer.features.len(),
+            1,
+            "two touching roads merged into one"
+        );
+        match &layer.features[0].geometry {
+            mvt::Geometry::Lines(lines) => {
+                assert_eq!(lines.len(), 1);
+                assert_eq!(lines[0].len(), 3, "stitched through the shared point");
+            }
+            other => panic!("expected lines, got {other:?}"),
+        }
     }
 }
