@@ -394,25 +394,67 @@ fn assemble_route(
 
 /// Stitch way fragments into closed rings by connecting matching endpoints
 /// (member ways share exact node coordinates, so equality matching is safe).
+///
+/// O(total fragments): both endpoints of every fragment are indexed in a
+/// hash map up front (hashing the exact f64 bit patterns — all coordinates come
+/// from the same node store, so equal points are bit-identical), and each
+/// extension is a lookup instead of a scan. Large admin boundaries have
+/// thousands of member ways, where the old linear scan was quadratic.
 fn assemble_rings(fragments: Vec<Vec<(f64, f64)>>) -> Vec<Vec<(f64, f64)>> {
-    let mut rings = Vec::new();
-    let mut pending: VecDeque<Vec<(f64, f64)>> =
-        fragments.into_iter().filter(|f| f.len() >= 2).collect();
+    fn key((x, y): (f64, f64)) -> (u64, u64) {
+        (x.to_bits(), y.to_bits())
+    }
 
-    while let Some(mut ring) = pending.pop_front() {
+    // Fragment slots are taken (`None`) as they are consumed; the endpoint index
+    // is cleaned up lazily by popping consumed entries when encountered.
+    let mut slots: Vec<Option<Vec<(f64, f64)>>> = fragments
+        .into_iter()
+        .filter(|f| f.len() >= 2)
+        .map(Some)
+        .collect();
+    // Candidates stay in fragment order and are consumed from the front, so an
+    // ambiguous junction (>2 fragments sharing an endpoint) picks the same
+    // fragment the old first-match linear scan did — output is unchanged.
+    let mut by_endpoint: HashMap<(u64, u64), VecDeque<usize>> = HashMap::new();
+    for (index, fragment) in slots.iter().enumerate() {
+        let fragment = fragment.as_ref().unwrap();
+        by_endpoint
+            .entry(key(fragment[0]))
+            .or_default()
+            .push_back(index);
+        by_endpoint
+            .entry(key(*fragment.last().unwrap()))
+            .or_default()
+            .push_back(index);
+    }
+
+    let mut rings = Vec::new();
+    for start in 0..slots.len() {
+        let Some(mut ring) = slots[start].take() else {
+            continue;
+        };
         loop {
             if is_closed(&ring) {
                 break;
             }
-            let end = *ring.last().unwrap();
-            let Some(index) = pending
-                .iter()
-                .position(|w| w.first() == Some(&end) || w.last() == Some(&end))
-            else {
+            let end_key = key(*ring.last().unwrap());
+            let next_index = match by_endpoint.get_mut(&end_key) {
+                Some(candidates) => loop {
+                    match candidates.front() {
+                        Some(&candidate) if slots[candidate].is_none() => {
+                            candidates.pop_front(); // consumed earlier; drop lazily
+                        }
+                        Some(&candidate) => break Some(candidate),
+                        None => break None,
+                    }
+                },
+                None => None,
+            };
+            let Some(index) = next_index else {
                 break; // cannot extend or close this ring
             };
-            let next = pending.remove(index).unwrap();
-            if next.first() == Some(&end) {
+            let next = slots[index].take().unwrap();
+            if key(next[0]) == end_key {
                 ring.extend_from_slice(&next[1..]);
             } else {
                 ring.extend(next.iter().rev().skip(1).copied());
