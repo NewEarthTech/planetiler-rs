@@ -39,6 +39,7 @@ pub fn stream_geojson(path: &Path, sink: &mut FeatureSink) -> Result<()> {
                 id: 0,
                 geometry: convert_geometry(geometry)?,
                 tags: BTreeMap::new(),
+                relations: Vec::new(),
             })?;
         }
     }
@@ -75,7 +76,12 @@ fn convert_feature(feature: ::geojson::Feature, fallback_id: u64) -> Result<Opti
         _ => fallback_id,
     };
 
-    Ok(Some(SourceFeature { id, geometry, tags }))
+    Ok(Some(SourceFeature {
+        id,
+        geometry,
+        tags,
+        relations: Vec::new(),
+    }))
 }
 
 fn convert_geometry(geometry: ::geojson::Geometry) -> Result<Geometry<f64>> {
