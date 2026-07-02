@@ -556,6 +556,7 @@ mod tests {
             id,
             geometry: Geometry::Point(Point::new(lng, lat)),
             tags: BTreeMap::from([("name".to_owned(), Value::from(name))]),
+            relations: Vec::new(),
         }
     }
 
@@ -719,6 +720,7 @@ mod tests {
                     coord! {x: bx, y: by},
                 ])),
                 tags: BTreeMap::from([("kind".to_owned(), Value::from("road"))]),
+                relations: Vec::new(),
             }
         };
         let features = vec![

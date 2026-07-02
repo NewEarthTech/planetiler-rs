@@ -11,7 +11,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::archive::TileCompression;
 use crate::pipeline::{GenerateOptions, generate_streaming};
-use crate::profile::PassthroughProfile;
+use crate::profile::{PassthroughProfile, Profile};
 use crate::source::{NodeStorage, osm_bounds, stream_source};
 
 /// planetiler-rs command-line interface.
@@ -163,7 +163,14 @@ fn run_generate(args: GenerateArgs) -> anyhow::Result<()> {
     };
     let profile = PassthroughProfile::new(args.layer);
     let stats = generate_streaming(
-        |sink| stream_source(&args.source, sink, storage),
+        |sink| {
+            stream_source(
+                &args.source,
+                sink,
+                storage,
+                Some(&|id, tags: &_| profile.preprocess_osm_relation(id, tags)),
+            )
+        },
         &profile,
         &options,
         &args.output,

@@ -12,6 +12,7 @@ pub use osm::{osm_bounds, read_osm, stream_osm};
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use geo_types::Geometry;
 
@@ -21,6 +22,26 @@ use crate::model::Value;
 /// A sink that receives source features one at a time, so readers can stream
 /// without materializing the whole extract in memory.
 pub type FeatureSink<'a> = dyn FnMut(SourceFeature) -> Result<()> + 'a;
+
+/// A profile callback deciding which OSM relations to index: given a
+/// relation's id and raw tags, return `Some(info)` to have that info attached
+/// (with the member's role) to every member way's [`SourceFeature`] — the
+/// analog of upstream's `preprocessOsmRelation`. Runs on decode workers, so it
+/// must be `Sync`.
+pub type RelationPreprocessor<'a> =
+    dyn Fn(i64, &BTreeMap<String, Value>) -> Option<BTreeMap<String, Value>> + Sync + 'a;
+
+/// One relation membership attached to a way feature: the way's role in the
+/// relation plus the info the profile returned for it.
+#[derive(Debug, Clone)]
+pub struct RelationMember {
+    /// The member way's role in the relation (empty when unset).
+    pub role: String,
+    /// The relation's OSM id.
+    pub relation_id: i64,
+    /// The info returned by the profile's relation preprocessor.
+    pub info: Arc<BTreeMap<String, Value>>,
+}
 
 /// Which node-location store the OSM reader uses. RAM is fast and the default;
 /// mmap is off-heap for extracts whose node store would not fit in memory.
@@ -36,10 +57,16 @@ pub enum NodeStorage {
 }
 
 /// Stream a source file into `sink`, dispatching by extension: `.pbf` → OSM,
-/// otherwise GeoJSON. `storage` selects the OSM node store (ignored otherwise).
-pub fn stream_source(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> Result<()> {
+/// otherwise GeoJSON. `storage` selects the OSM node store and `relations` the
+/// optional relation preprocessor (both ignored for non-OSM sources).
+pub fn stream_source(
+    path: &Path,
+    sink: &mut FeatureSink,
+    storage: NodeStorage,
+    relations: Option<&RelationPreprocessor>,
+) -> Result<()> {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("pbf") => stream_osm(path, sink, storage),
+        Some("pbf") => stream_osm(path, sink, storage, relations),
         _ => stream_geojson(path, sink),
     }
 }
@@ -53,6 +80,10 @@ pub struct SourceFeature {
     pub geometry: Geometry<f64>,
     /// Attribute tags.
     pub tags: BTreeMap<String, Value>,
+    /// Relation memberships the profile asked to index (ways only; empty
+    /// unless a [`RelationPreprocessor`] returned info for a containing
+    /// relation).
+    pub relations: Vec<RelationMember>,
 }
 
 impl SourceFeature {

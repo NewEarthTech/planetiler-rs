@@ -22,7 +22,9 @@ use geo_types::{
 use osmpbf::{Blob, BlobDecode, BlobReader, PrimitiveBlock, RelMemberType};
 use rayon::prelude::*;
 
-use super::{FeatureSink, NodeStorage, SourceFeature};
+use std::sync::Arc;
+
+use super::{FeatureSink, NodeStorage, RelationMember, RelationPreprocessor, SourceFeature};
 use crate::collection::{MmapNodeStore, NodeLocations, NodeStore, SparseNodeStore};
 use crate::error::{Error, Result};
 use crate::model::Value;
@@ -60,7 +62,12 @@ struct PendingRelation {
 ///
 /// # Errors
 /// Returns [`Error::Source`] if the PBF cannot be read.
-pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> Result<()> {
+pub fn stream_osm(
+    path: &Path,
+    sink: &mut FeatureSink,
+    storage: NodeStorage,
+    preprocess: Option<&RelationPreprocessor>,
+) -> Result<()> {
     let mut locations: Box<dyn NodeStore> = match storage {
         NodeStorage::Ram => Box::new(NodeLocations::default()),
         NodeStorage::Mmap => Box::new(MmapNodeStore::new()?),
@@ -68,6 +75,8 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
     };
     let mut relations: Vec<PendingRelation> = Vec::new();
     let mut needed_ways: HashSet<i64> = HashSet::new();
+    // way id -> memberships the profile asked to index (via `preprocess`).
+    let mut way_relations: HashMap<i64, Vec<RelationMember>> = HashMap::new();
 
     // Pass 1: node locations + point features + relation definitions.
     let pass1_start = std::time::Instant::now();
@@ -107,6 +116,16 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
                 }
                 for relation in group.relations() {
                     let mut tags = collect_tags(relation.tags());
+                    if let Some(preprocess) = preprocess
+                        && let Some(info) = preprocess(relation.id(), &tags)
+                    {
+                        let members: Vec<(i64, String)> = relation
+                            .members()
+                            .filter(|m| m.member_type == RelMemberType::Way)
+                            .map(|m| (m.member_id, m.role().unwrap_or("").to_owned()))
+                            .collect();
+                        out.relation_infos.push((relation.id(), info, members));
+                    }
                     let Some(kind) = relation_kind(&tags) else {
                         continue;
                     };
@@ -144,6 +163,19 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
                 needed_ways.extend(relation.members.iter().map(|&(id, _)| id));
                 relations.push(relation);
             }
+            for (relation_id, info, members) in out.relation_infos {
+                let info = Arc::new(info);
+                for (way_id, role) in members {
+                    way_relations
+                        .entry(way_id)
+                        .or_default()
+                        .push(RelationMember {
+                            role,
+                            relation_id,
+                            info: Arc::clone(&info),
+                        });
+                }
+            }
             Ok(())
         },
     )?;
@@ -161,6 +193,7 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
     {
         let store: &dyn NodeStore = &*locations;
         let needed = &needed_ways;
+        let memberships = &way_relations;
         for_each_block_parallel(
             path,
             |block| {
@@ -184,7 +217,8 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
                             info.version(),
                             info.milli_timestamp(),
                         );
-                        if let Some(feature) = way_feature(way.id(), &coords, tags) {
+                        let relations = memberships.get(&way.id()).cloned().unwrap_or_default();
+                        if let Some(feature) = way_feature(way.id(), &coords, tags, relations) {
                             out.features.push(feature);
                         }
                     }
@@ -225,6 +259,7 @@ pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
             Ok(())
         },
         NodeStorage::Ram,
+        None,
     )?;
     Ok(features)
 }
@@ -250,11 +285,16 @@ pub fn osm_bounds(path: &Path) -> Result<Option<(f64, f64, f64, f64)>> {
 }
 
 /// Decoded output of one pass-1 blob, in element order.
+/// One relation the profile's preprocessor asked to index:
+/// `(relation_id, profile info, members as (way_id, role))`.
+type IndexedRelation = (i64, BTreeMap<String, Value>, Vec<(i64, String)>);
+
 #[derive(Default)]
 struct NodeBlock {
     locations: Vec<(i64, f64, f64)>,
     features: Vec<SourceFeature>,
     relations: Vec<PendingRelation>,
+    relation_infos: Vec<IndexedRelation>,
 }
 
 /// Decoded output of one pass-2 blob, in element order.
@@ -349,6 +389,7 @@ fn point(id: i64, lon: f64, lat: f64, tags: BTreeMap<String, Value>) -> SourceFe
         id: feature_id(id, NODE_KIND),
         geometry: Geometry::Point(Point::new(lon, lat)),
         tags,
+        relations: Vec::new(),
     }
 }
 
@@ -356,6 +397,7 @@ fn way_feature(
     id: i64,
     coords: &[(f64, f64)],
     tags: BTreeMap<String, Value>,
+    relations: Vec<RelationMember>,
 ) -> Option<SourceFeature> {
     let closed = coords.len() >= 4 && coords.first() == coords.last();
     let geometry = if closed && is_area(&tags) {
@@ -367,6 +409,7 @@ fn way_feature(
         id: feature_id(id, WAY_KIND),
         geometry,
         tags,
+        relations,
     })
 }
 
@@ -415,6 +458,7 @@ fn assemble_relation(
         id: feature_id(relation.id, RELATION_KIND),
         geometry,
         tags: relation.tags.clone(),
+        relations: Vec::new(),
     })
 }
 
@@ -591,7 +635,7 @@ mod tests {
     #[test]
     fn closed_building_is_polygon() {
         let square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)];
-        let f = way_feature(1, &square, tags(&[("building", "yes")])).unwrap();
+        let f = way_feature(1, &square, tags(&[("building", "yes")]), Vec::new()).unwrap();
         assert!(matches!(f.geometry, Geometry::Polygon(_)));
         assert_eq!(f.id, feature_id(1, WAY_KIND));
     }
@@ -603,6 +647,7 @@ mod tests {
             2,
             &loop_,
             tags(&[("highway", "residential"), ("junction", "roundabout")]),
+            Vec::new(),
         )
         .unwrap();
         assert!(matches!(f.geometry, Geometry::LineString(_)));
@@ -611,14 +656,20 @@ mod tests {
     #[test]
     fn open_way_is_line() {
         let path = [(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)];
-        let f = way_feature(3, &path, tags(&[("highway", "primary")])).unwrap();
+        let f = way_feature(3, &path, tags(&[("highway", "primary")]), Vec::new()).unwrap();
         assert!(matches!(f.geometry, Geometry::LineString(_)));
     }
 
     #[test]
     fn area_no_forces_line() {
         let square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)];
-        let f = way_feature(4, &square, tags(&[("landuse", "grass"), ("area", "no")])).unwrap();
+        let f = way_feature(
+            4,
+            &square,
+            tags(&[("landuse", "grass"), ("area", "no")]),
+            Vec::new(),
+        )
+        .unwrap();
         assert!(matches!(f.geometry, Geometry::LineString(_)));
     }
 

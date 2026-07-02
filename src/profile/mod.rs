@@ -9,8 +9,11 @@
 
 mod collector;
 
+use std::collections::BTreeMap;
+
 pub use collector::{FeatureCollector, VectorFeature};
 
+use crate::model::Value;
 use crate::mvt;
 use crate::source::SourceFeature;
 
@@ -22,6 +25,20 @@ pub trait Profile {
     /// Profile name, used for archive metadata.
     fn name(&self) -> &str {
         "planetiler-rs"
+    }
+
+    /// Decide whether to index an OSM relation: return `Some(info)` to have
+    /// that info attached (with each member's role) to every member way's
+    /// [`SourceFeature`] — the analog of upstream's `preprocessOsmRelation`.
+    /// Called for every relation during the OSM node pass, on decode workers.
+    /// The default indexes nothing.
+    fn preprocess_osm_relation(
+        &self,
+        relation_id: i64,
+        tags: &BTreeMap<String, Value>,
+    ) -> Option<BTreeMap<String, Value>> {
+        let _ = (relation_id, tags);
+        None
     }
 
     /// Post-process one tile layer's features just before encoding — the hook
@@ -79,6 +96,7 @@ mod tests {
                 ("name".to_owned(), Value::from("Casino")),
                 ("rank".to_owned(), Value::Int(1)),
             ]),
+            relations: Vec::new(),
         }
     }
 
