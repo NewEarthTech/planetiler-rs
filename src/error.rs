@@ -38,6 +38,16 @@ pub enum Error {
     #[error("source error: {0}")]
     Source(&'static str),
 
+    /// A source failed with an underlying cause worth surfacing (e.g. a
+    /// truncated or corrupt `.osm.pbf`).
+    #[error("source error: {context}: {message}")]
+    SourceDetail {
+        /// What the reader was doing.
+        context: &'static str,
+        /// The underlying error's message.
+        message: String,
+    },
+
     /// A feature blob could not be (de)serialized for the external sort.
     #[error("feature codec error: {0}")]
     Codec(&'static str),
