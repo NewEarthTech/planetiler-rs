@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use rusqlite::{Connection, params};
+use xxhash_rust::xxh3::xxh3_128;
 
 use super::metadata::TileArchiveMetadata;
 use super::{TileArchive, TileCompression};
@@ -48,11 +49,18 @@ join tiles_data on tiles_shallow.tile_data_id = tiles_data.tile_data_id;
 /// `tiles_data` row. (Upstream only deduplicates tiles it judges likely to
 /// repeat; deduplicating all identical tiles yields the same readable output
 /// via the `tiles` view, with a possibly smaller `tiles_data` table.)
+///
+/// Dedup is keyed by a 128-bit content hash rather than the blob itself, so
+/// its memory stays ~16 bytes per unique tile instead of the whole archive
+/// (which reached tens of GB at continent scale). A collision would alias two
+/// different tiles; at 2^-128 per pair that stays negligible past planet-scale
+/// tile counts (the same trust content-addressed systems place in their
+/// hashes, with a wider hash than upstream's 64-bit `fnv1a`).
 pub struct MbtilesWriter {
     conn: Connection,
     compression: TileCompression,
     next_data_id: i64,
-    dedup: HashMap<Vec<u8>, i64>,
+    dedup: HashMap<u128, i64>,
 }
 
 impl MbtilesWriter {
@@ -63,9 +71,16 @@ impl MbtilesWriter {
         conn.execute_batch(&format!(
             "PRAGMA application_id = {APPLICATION_ID};
              PRAGMA journal_mode = OFF;
-             PRAGMA synchronous = OFF;"
+             PRAGMA synchronous = OFF;
+             PRAGMA cache_size = -65536;"
         ))?;
         conn.execute_batch(SCHEMA_SQL)?;
+        // One bulk transaction for the whole archive: with the journal off,
+        // per-statement autocommits still rewrite dirty B-tree pages at every
+        // commit boundary; deferring the commit to `finish` writes each page
+        // about once. (Journal-off means no rollback either way — an aborted
+        // run leaves a partial file exactly as it did with autocommit.)
+        conn.execute_batch("BEGIN")?;
         Ok(Self {
             conn,
             compression,
@@ -88,27 +103,30 @@ impl MbtilesWriter {
     /// TMS-flipped position. Compression (the expensive part) is done by the
     /// caller so it can run in parallel; this method is the serial writer.
     pub fn write_tile_compressed(&mut self, coord: TileCoord, compressed: &[u8]) -> Result<()> {
-        let data_id = match self.dedup.get(compressed) {
+        let hash = xxh3_128(compressed);
+        let data_id = match self.dedup.get(&hash) {
             Some(&id) => id,
             None => {
                 let id = self.next_data_id;
                 self.next_data_id += 1;
-                self.conn.execute(
-                    "INSERT OR IGNORE INTO tiles_data (tile_data_id, tile_data) VALUES (?1, ?2)",
-                    params![id, compressed],
-                )?;
-                self.dedup.insert(compressed.to_vec(), id);
+                self.conn
+                    .prepare_cached(
+                        "INSERT INTO tiles_data (tile_data_id, tile_data) VALUES (?1, ?2)",
+                    )?
+                    .execute(params![id, compressed])?;
+                self.dedup.insert(hash, id);
                 id
             }
         };
 
         // MBTiles stores TMS: flip the Y row within the zoom level.
         let tms_y = (1u32 << coord.z()) - 1 - coord.y();
-        self.conn.execute(
-            "INSERT INTO tiles_shallow (zoom_level, tile_column, tile_row, tile_data_id) \
-             VALUES (?1, ?2, ?3, ?4)",
-            params![coord.z(), coord.x(), tms_y, data_id],
-        )?;
+        self.conn
+            .prepare_cached(
+                "INSERT INTO tiles_shallow (zoom_level, tile_column, tile_row, tile_data_id) \
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?
+            .execute(params![coord.z(), coord.x(), tms_y, data_id])?;
         Ok(())
     }
 }
@@ -128,7 +146,7 @@ impl TileArchive for MbtilesWriter {
     }
 
     fn finish(&mut self) -> Result<()> {
-        // Writes are autocommitted (journal_mode OFF); nothing to flush.
+        self.conn.execute_batch("COMMIT")?;
         Ok(())
     }
 }

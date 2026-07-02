@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
+use std::sync::mpsc;
 
 use geo_types::Geometry;
 use rayon::prelude::*;
@@ -224,8 +225,21 @@ fn flush_render_batch(
     Ok(())
 }
 
-/// Stream the sorted entries, group consecutive same-tile records into complete
-/// tiles, then encode + compress a batch of them in parallel and insert serially.
+/// One whole tile's sorted entries, grouped by the merge stage and decoded +
+/// encoded by the parallel stage.
+struct RawTile {
+    coord: TileCoord,
+    entries: Vec<Entry>,
+}
+
+/// Stream the sorted entries and write finished tiles, overlapping three
+/// stages: a merge thread runs the k-way merge and splits the stream into
+/// whole tiles at key boundaries (applying the per-tile-layer cap before any
+/// blob is decoded), batches of tiles are decoded + post-processed + encoded +
+/// compressed across the rayon pool, and the calling thread inserts the
+/// finished blobs serially, in merge order — so output is identical to a
+/// fully serial write. Bounded channels keep only a few batches in flight,
+/// bounding memory regardless of archive size.
 fn write_sorted_tiles(
     sort: ExternalMergeSort,
     registry: &LayerRegistry,
@@ -235,100 +249,166 @@ fn write_sorted_tiles(
     max_features_per_tile: usize,
     writer: &mut ArchiveWriter,
 ) -> Result<usize> {
-    const WRITE_BATCH: usize = 256;
-    let mut tiles_written = 0;
-    let mut dropped: u64 = 0;
-    let mut current: Option<TileCoord> = None;
-    let mut layers: BTreeMap<u8, Vec<mvt::Feature>> = BTreeMap::new();
-    let mut batch: Vec<(TileCoord, mvt::Tile)> = Vec::new();
+    // Tiles per encode batch; a batch also flushes past an entry budget so a
+    // run of dense tiles can't accumulate unbounded before hand-off.
+    const BATCH_TILES: usize = 256;
+    const BATCH_ENTRIES: usize = 1 << 18;
+    // Batches in flight per hand-off: enough to keep every stage busy, small
+    // enough to cap the pipeline's working set.
+    const CHANNEL_DEPTH: usize = 2;
 
-    let finalize = |coord: TileCoord, layers: &mut BTreeMap<u8, Vec<mvt::Feature>>| {
-        let mvt_layers: Vec<mvt::Layer> = std::mem::take(layers)
-            .into_iter()
-            .map(|(index, features)| {
-                let name = registry.name(index);
-                // The profile's tile-space hook (line merging, dissolve, drops).
-                let features = profile.post_process_layer(name, coord.z(), features);
-                mvt::Layer {
-                    name: name.to_owned(),
-                    version: 2,
-                    extent,
-                    features,
-                }
-            })
-            .filter(|layer| !layer.features.is_empty())
-            .collect();
-        (coord, mvt::Tile { layers: mvt_layers })
-    };
+    let (raw_tx, raw_rx) = mpsc::sync_channel::<Vec<RawTile>>(CHANNEL_DEPTH);
+    let (encoded_tx, encoded_rx) = mpsc::sync_channel::<Vec<(TileCoord, Vec<u8>)>>(CHANNEL_DEPTH);
 
-    for entry in sort.into_sorted()? {
-        let entry = entry?;
-        let tile = entry.key.tile();
-        if current != Some(tile) {
-            if let Some(previous) = current.take() {
-                let (coord, tile_data) = finalize(previous, &mut layers);
-                if !tile_data.layers.is_empty() {
-                    batch.push((coord, tile_data));
+    std::thread::scope(|scope| {
+        // Stage 1: merge + group by tile. Touches only sort keys, never blobs.
+        let merger = scope.spawn(move || -> Result<u64> {
+            let mut dropped = 0u64;
+            let mut batch: Vec<RawTile> = Vec::new();
+            let mut batch_entries = 0usize;
+            let mut current: Option<RawTile> = None;
+            // Kept-feature count for the current tile's current layer. Entries
+            // within a tile arrive layer-contiguous (the layer sits above the
+            // zorder in the sort key), so one counter implements the cap.
+            let mut layer_seen = (0u8, 0usize);
+            for entry in sort.into_sorted()? {
+                let entry = entry?;
+                let tile = entry.key.tile();
+                if current.as_ref().map(|raw| raw.coord) != Some(tile) {
+                    if let Some(done) = current.take() {
+                        batch_entries += done.entries.len();
+                        batch.push(done);
+                        if batch.len() >= BATCH_TILES || batch_entries >= BATCH_ENTRIES {
+                            if raw_tx.send(std::mem::take(&mut batch)).is_err() {
+                                // A downstream stage hung up after failing; its
+                                // error is the one worth reporting.
+                                return Ok(dropped);
+                            }
+                            batch_entries = 0;
+                        }
+                    }
+                    current = Some(RawTile {
+                        coord: tile,
+                        entries: Vec::new(),
+                    });
+                    layer_seen = (0, 0);
                 }
-                if batch.len() >= WRITE_BATCH {
-                    flush_batch(&mut batch, compression, writer, &mut tiles_written)?;
+                // Cap kept features per tile-layer so a low-zoom mega-tile
+                // can't decode millions of features downstream. Entries arrive
+                // in sort order, so the first `max_features_per_tile` are kept
+                // deterministically and the rest skipped without decoding.
+                if max_features_per_tile != 0 {
+                    let layer = entry.key.layer();
+                    if layer_seen.0 != layer {
+                        layer_seen = (layer, 0);
+                    }
+                    if layer_seen.1 >= max_features_per_tile {
+                        dropped += 1;
+                        continue;
+                    }
+                    layer_seen.1 += 1;
+                }
+                current
+                    .as_mut()
+                    .expect("current tile is set at the boundary above")
+                    .entries
+                    .push(entry);
+            }
+            if let Some(done) = current.take() {
+                batch.push(done);
+            }
+            if !batch.is_empty() {
+                let _ = raw_tx.send(batch);
+            }
+            Ok(dropped)
+        });
+
+        // Stage 2: decode + post-process + encode + compress each batch across
+        // the rayon pool. The parallel collect preserves tile order.
+        let encoder = scope.spawn(move || -> Result<()> {
+            while let Ok(batch) = raw_rx.recv() {
+                let encoded = batch
+                    .into_par_iter()
+                    .map(|raw| encode_raw_tile(raw, registry, profile, extent, compression))
+                    .collect::<Result<Vec<Option<(TileCoord, Vec<u8>)>>>>()?;
+                let encoded: Vec<(TileCoord, Vec<u8>)> = encoded.into_iter().flatten().collect();
+                if encoded_tx.send(encoded).is_err() {
+                    return Ok(()); // the writer failed; its error wins
                 }
             }
-            current = Some(tile);
-        }
-        // Cap features per tile-layer so a low-zoom mega-tile can't hold millions
-        // of decoded features in memory. Entries arrive in sort order, so this
-        // keeps the first `max_features_per_tile` deterministically and skips the
-        // rest (including their decode).
-        let layer_features = layers.entry(entry.key.layer()).or_default();
-        if max_features_per_tile != 0 && layer_features.len() >= max_features_per_tile {
-            dropped += 1;
-            continue;
-        }
-        let blob = decode_blob(&entry.value)?;
-        layer_features.push(mvt::Feature {
-            id: blob.id,
-            geometry: blob.geometry,
-            attributes: blob.attrs,
+            Ok(())
         });
-    }
-    if let Some(previous) = current.take() {
-        let (coord, tile_data) = finalize(previous, &mut layers);
-        if !tile_data.layers.is_empty() {
-            batch.push((coord, tile_data));
+
+        // Stage 3 (this thread): the serial archive writer.
+        let mut tiles_written = 0usize;
+        let mut write_result: Result<()> = Ok(());
+        'writing: while let Ok(batch) = encoded_rx.recv() {
+            for (coord, bytes) in batch {
+                if let Err(e) = writer.write_tile_compressed(coord, &bytes) {
+                    write_result = Err(e);
+                    break 'writing; // dropping the receiver unwinds the stages
+                }
+                tiles_written += 1;
+            }
         }
-    }
-    flush_batch(&mut batch, compression, writer, &mut tiles_written)?;
-    if dropped > 0 {
-        tracing::info!(
-            dropped,
-            max_features_per_tile,
-            "dropped features over per-tile cap"
-        );
-    }
-    Ok(tiles_written)
+
+        let dropped = merger.join().expect("merge stage panicked")?;
+        encoder.join().expect("encode stage panicked")?;
+        write_result?;
+        if dropped > 0 {
+            tracing::info!(
+                dropped,
+                max_features_per_tile,
+                "dropped features over per-tile cap"
+            );
+        }
+        Ok(tiles_written)
+    })
 }
 
-/// Encode + compress a batch of tiles across cores, then insert them serially.
-fn flush_batch(
-    batch: &mut Vec<(TileCoord, mvt::Tile)>,
+/// Decode one grouped tile's entries into layers, run the profile's tile-space
+/// hook, and encode + compress — the per-tile work of the parallel stage.
+/// Returns `None` when post-processing leaves the tile empty.
+fn encode_raw_tile(
+    raw: RawTile,
+    registry: &LayerRegistry,
+    profile: &dyn Profile,
+    extent: u32,
     compression: TileCompression,
-    writer: &mut ArchiveWriter,
-    count: &mut usize,
-) -> Result<()> {
-    if batch.is_empty() {
-        return Ok(());
+) -> Result<Option<(TileCoord, Vec<u8>)>> {
+    let mut layers: BTreeMap<u8, Vec<mvt::Feature>> = BTreeMap::new();
+    for entry in &raw.entries {
+        let blob = decode_blob(&entry.value)?;
+        layers
+            .entry(entry.key.layer())
+            .or_default()
+            .push(mvt::Feature {
+                id: blob.id,
+                geometry: blob.geometry,
+                attributes: blob.attrs,
+            });
     }
-    let compressed: Vec<(TileCoord, Vec<u8>)> = batch
-        .par_iter()
-        .map(|(coord, tile)| Ok::<_, Error>((*coord, compression.compress(&encode_tile(tile))?)))
-        .collect::<Result<Vec<_>>>()?;
-    for (coord, bytes) in compressed {
-        writer.write_tile_compressed(coord, &bytes)?;
-        *count += 1;
+    let mvt_layers: Vec<mvt::Layer> = layers
+        .into_iter()
+        .map(|(index, features)| {
+            let name = registry.name(index);
+            // The profile's tile-space hook (line merging, dissolve, drops).
+            let features = profile.post_process_layer(name, raw.coord.z(), features);
+            mvt::Layer {
+                name: name.to_owned(),
+                version: 2,
+                extent,
+                features,
+            }
+        })
+        .filter(|layer| !layer.features.is_empty())
+        .collect();
+    if mvt_layers.is_empty() {
+        return Ok(None);
     }
-    batch.clear();
-    Ok(())
+    let tile = mvt::Tile { layers: mvt_layers };
+    let bytes = compression.compress(&encode_tile(&tile))?;
+    Ok(Some((raw.coord, bytes)))
 }
 
 /// The opaque per-feature payload sorted alongside the sort key.
