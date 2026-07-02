@@ -25,6 +25,7 @@ pub mod model;
 pub mod archive;
 pub mod cli;
 pub mod collection;
+pub mod merge;
 pub mod mvt;
 pub mod pipeline;
 pub mod profile;
