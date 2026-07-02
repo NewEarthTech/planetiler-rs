@@ -18,7 +18,15 @@ use crate::mvt;
 use crate::source::SourceFeature;
 
 /// A schema that maps source features to output vector features.
-pub trait Profile {
+///
+/// `Send + Sync` because a profile is shared across worker threads: relation
+/// preprocessing runs on OSM decode workers and [`post_process_layer`] runs on
+/// the parallel tile-encode workers. Profiles hold configuration, not
+/// per-feature state, so this is the natural contract (upstream's `Profile` is
+/// shared across threads the same way).
+///
+/// [`post_process_layer`]: Profile::post_process_layer
+pub trait Profile: Send + Sync {
     /// Process one source feature, emitting any output features into `features`.
     fn process_feature(&self, source: &SourceFeature, features: &mut FeatureCollector);
 

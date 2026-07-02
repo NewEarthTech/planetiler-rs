@@ -25,6 +25,7 @@ osmpbf = "0.3.8"
 memmap2 = "0.9.9"
 geo = "0.33.1"
 shapefile = { version = "0.8.0", features = ["geo-types"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 criterion = "0.5"
