@@ -2,7 +2,9 @@
 name = "planetiler-rs"
 version = "0.1.0"
 edition = "2024"
-description = "A Rust port of Planetiler: planet-scale vector tile generation from OpenStreetMap and other geodata."
+description = "A Rust port of Planetiler: fast, low-memory vector tile generation from OpenStreetMap and other geodata."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/johncarmack1984/planetiler-rs"
 default-run = "planetiler-rs"
 
 [dependencies]
