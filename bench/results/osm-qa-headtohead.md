@@ -47,6 +47,8 @@ Near-identical output (21472 vs 21340 tiles, 0.6%). The honest verdict at countr
 
 **So the "beats it on time *and* memory" bar is half-met at country scale: memory yes, time no (yet).**
 
+**Sort-buffer sweep (falsifies the "we're slow because we're frugal" hypothesis):** raising `--sort-memory-mb` from 256 MB to 4 GB / 16 GB (and pairing 16 GB with the ram node store) left wall time flat — 332 s / 332 s / 328 s / 330 s — while RSS climbed to 9–11 GB. Spending 2.5× the memory bought back nothing: sort-spill I/O is cheap (sequential SSD), so the 4× time gap is **compute throughput** in read → render → encode. Prime suspect: the PBF is decoded **single-threaded** (`osmpbf::for_each`) and scanned **twice** (node pass + way pass), while Planetiler decodes blocks across all cores.
+
 ## Output parity (monaco, z12-14, via `bench compare`)
 
 Measured with the parity oracle (`bench compare ours.mbtiles java.mbtiles`), which decodes both archives and reports tile-set overlap + per-tile semantic equality. Progress from the initial "wildly different" state:

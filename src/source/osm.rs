@@ -70,6 +70,7 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
     let mut sink_err: Option<Error> = None;
 
     // Pass 1: node locations + point features + relation definitions.
+    let pass1_start = std::time::Instant::now();
     reader(path)?
         .for_each(|element| match element {
             Element::Node(node) => {
@@ -131,8 +132,13 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
         return Err(err);
     }
     locations.finish()?;
+    tracing::info!(
+        elapsed_s = pass1_start.elapsed().as_secs_f64(),
+        "osm pass 1 (nodes) done"
+    );
 
     // Pass 2: way features + capture member-way geometries for relations.
+    let pass2_start = std::time::Instant::now();
     let mut member_ways: HashMap<i64, Vec<(f64, f64)>> = HashMap::new();
     reader(path)?
         .for_each(|element| {
@@ -168,6 +174,11 @@ pub fn stream_osm(path: &Path, sink: &mut FeatureSink, storage: NodeStorage) -> 
     if let Some(err) = sink_err.take() {
         return Err(err);
     }
+
+    tracing::info!(
+        elapsed_s = pass2_start.elapsed().as_secs_f64(),
+        "osm pass 2 (ways) done"
+    );
 
     // Assemble relations from their (now known) member geometries.
     for relation in relations {
