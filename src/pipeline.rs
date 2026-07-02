@@ -15,9 +15,7 @@ use std::path::Path;
 use geo_types::Geometry;
 use rayon::prelude::*;
 
-use crate::archive::{
-    FieldType, MbtilesWriter, TileArchive, TileArchiveMetadata, TileCompression, VectorLayer,
-};
+use crate::archive::{ArchiveWriter, FieldType, TileArchiveMetadata, TileCompression, VectorLayer};
 use crate::collection::ExternalMergeSort;
 use crate::error::{Error, Result};
 use crate::geom::TileCoord;
@@ -147,7 +145,7 @@ where
 
     let write_start = std::time::Instant::now();
     let metadata = build_metadata(&layer_stats, &bounds, options, profile);
-    let mut writer = MbtilesWriter::create(output, options.compression)?;
+    let mut writer = ArchiveWriter::create(output, options.compression)?;
     writer.write_metadata(&metadata)?;
     let tiles = write_sorted_tiles(
         sort,
@@ -235,7 +233,7 @@ fn write_sorted_tiles(
     extent: u32,
     compression: TileCompression,
     max_features_per_tile: usize,
-    writer: &mut MbtilesWriter,
+    writer: &mut ArchiveWriter,
 ) -> Result<usize> {
     const WRITE_BATCH: usize = 256;
     let mut tiles_written = 0;
@@ -315,7 +313,7 @@ fn write_sorted_tiles(
 fn flush_batch(
     batch: &mut Vec<(TileCoord, mvt::Tile)>,
     compression: TileCompression,
-    writer: &mut MbtilesWriter,
+    writer: &mut ArchiveWriter,
     count: &mut usize,
 ) -> Result<()> {
     if batch.is_empty() {
