@@ -9,6 +9,8 @@
 
 mod node_store;
 mod sort;
+mod way_store;
 
 pub use node_store::{MmapNodeStore, NodeLocations, NodeStore, SparseNodeStore};
 pub use sort::{ExternalMergeSort, SortedEntries};
+pub use way_store::WayGeometryStore;

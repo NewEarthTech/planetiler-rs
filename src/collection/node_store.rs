@@ -27,13 +27,13 @@ const RECORD: usize = 16;
 /// an `i32` (`180 * 1e7 < i32::MAX`).
 const SCALE: f64 = 1e7;
 
-fn pack(lon: f64, lat: f64) -> u64 {
+pub(crate) fn pack(lon: f64, lat: f64) -> u64 {
     let lon_e7 = (lon * SCALE).round() as i32 as u32;
     let lat_e7 = (lat * SCALE).round() as i32 as u32;
     (u64::from(lon_e7) << 32) | u64::from(lat_e7)
 }
 
-fn unpack(value: u64) -> (f64, f64) {
+pub(crate) fn unpack(value: u64) -> (f64, f64) {
     let lon_e7 = (value >> 32) as u32 as i32;
     let lat_e7 = (value & 0xFFFF_FFFF) as u32 as i32;
     (f64::from(lon_e7) / SCALE, f64::from(lat_e7) / SCALE)

@@ -4,16 +4,19 @@
 //! location (a [`NodeStore`] selected via [`NodeStorage`]), emits tagged nodes
 //! as point features, and collects multipolygon/route relation definitions;
 //! pass 2 assembles ways into line/polygon geometry (sharing the finished node
-//! store across workers) and captures the geometries of ways that relations
-//! reference; then relations are assembled (multipolygon ring-stitching + hole
-//! assignment, route multilinestrings). Each pass reads blobs sequentially but
+//! store across workers) and streams the geometries of relation member ways to
+//! a file-backed [`WayGeometryStore`]; then relations are assembled
+//! (multipolygon ring-stitching + hole assignment, route multilinestrings).
+//! The between-pass state is deliberately compact — packed on-disk member
+//! geometries, a sorted id slice, postcard-encoded pending tags — because on a
+//! continent extract it otherwise dominates peak memory. Each pass reads blobs sequentially but
 //! decodes them in parallel windows with ordered consumption
 //! ([`for_each_block_parallel`]), so node ids stay ascending and feature
 //! emission stays deterministic while the expensive protobuf/zlib decode uses
 //! every core. Features are pushed to a sink as they are produced
 //! ([`stream_osm`]), so the pipeline never holds them all.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 
 use geo_types::{
@@ -25,7 +28,9 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 use super::{FeatureSink, NodeStorage, RelationMember, RelationPreprocessor, SourceFeature};
-use crate::collection::{MmapNodeStore, NodeLocations, NodeStore, SparseNodeStore};
+use crate::collection::{
+    MmapNodeStore, NodeLocations, NodeStore, SparseNodeStore, WayGeometryStore,
+};
 use crate::error::{Error, Result};
 use crate::model::Value;
 
@@ -50,12 +55,28 @@ enum RelationKind {
 }
 
 /// A relation collected in pass 1, assembled after pass 2.
+///
+/// Tags are held postcard-encoded rather than as a live `BTreeMap`: a
+/// continent extract collects millions of pending relations, and the packed
+/// blob is several times smaller than the tree it decodes back into at
+/// assembly time.
 struct PendingRelation {
     id: i64,
     kind: RelationKind,
-    tags: BTreeMap<String, Value>,
+    /// postcard-encoded `BTreeMap<String, Value>`.
+    tags: Vec<u8>,
     /// `(way_id, is_inner)` members, in order.
     members: Vec<(i64, bool)>,
+}
+
+impl PendingRelation {
+    fn encode_tags(tags: &BTreeMap<String, Value>) -> Vec<u8> {
+        postcard::to_allocvec(tags).expect("relation tag encode is infallible")
+    }
+
+    fn decode_tags(&self) -> BTreeMap<String, Value> {
+        postcard::from_bytes(&self.tags).expect("tags were encoded by pass 1")
+    }
 }
 
 /// Stream nodes, ways, and relations from an `.osm.pbf` into `sink`.
@@ -74,7 +95,10 @@ pub fn stream_osm(
         NodeStorage::Sparse => Box::new(SparseNodeStore::new()?),
     };
     let mut relations: Vec<PendingRelation> = Vec::new();
-    let mut needed_ways: HashSet<i64> = HashSet::new();
+    // Way ids some relation references; sorted + deduped between the passes so
+    // pass 2 can binary-search a flat slice (a HashSet of tens of millions of
+    // ids costs several times the 8 bytes/id this does).
+    let mut needed_ways: Vec<i64> = Vec::new();
     // way id -> memberships the profile asked to index (via `preprocess`).
     let mut way_relations: HashMap<i64, Vec<RelationMember>> = HashMap::new();
 
@@ -145,7 +169,7 @@ pub fn stream_osm(
                     out.relations.push(PendingRelation {
                         id: relation.id(),
                         kind,
-                        tags,
+                        tags: PendingRelation::encode_tags(&tags),
                         members,
                     });
                 }
@@ -180,6 +204,8 @@ pub fn stream_osm(
         },
     )?;
     locations.finish()?;
+    needed_ways.sort_unstable();
+    needed_ways.dedup();
     tracing::info!(
         elapsed_s = pass1_start.elapsed().as_secs_f64(),
         "osm pass 1 (nodes) done"
@@ -187,9 +213,10 @@ pub fn stream_osm(
 
     // Pass 2: way features + capture member-way geometries for relations. The
     // finished node store is shared read-only across the decode workers, so the
-    // per-node location lookups parallelize along with the decode.
+    // per-node location lookups parallelize along with the decode. Member-way
+    // geometries stream to the file-backed store, not the heap.
     let pass2_start = std::time::Instant::now();
-    let mut member_ways: HashMap<i64, Vec<(f64, f64)>> = HashMap::new();
+    let mut member_ways = WayGeometryStore::new()?;
     {
         let store: &dyn NodeStore = &*locations;
         let needed = &needed_ways;
@@ -202,7 +229,7 @@ pub fn stream_osm(
                     for way in group.ways() {
                         let coords: Vec<(f64, f64)> =
                             way.refs().filter_map(|id| store.get(id)).collect();
-                        if needed.contains(&way.id()) {
+                        if needed.binary_search(&way.id()).is_ok() {
                             out.member_ways.push((way.id(), coords.clone()));
                         }
                         let mut tags = collect_tags(way.tags());
@@ -226,7 +253,9 @@ pub fn stream_osm(
                 out
             },
             |out| {
-                member_ways.extend(out.member_ways);
+                for (way_id, coords) in out.member_ways {
+                    member_ways.put(way_id, &coords);
+                }
                 for feature in out.features {
                     sink(feature)?;
                 }
@@ -234,6 +263,7 @@ pub fn stream_osm(
             },
         )?;
     }
+    member_ways.finish()?;
     tracing::info!(
         elapsed_s = pass2_start.elapsed().as_secs_f64(),
         "osm pass 2 (ways) done"
@@ -448,7 +478,7 @@ fn relation_kind(tags: &BTreeMap<String, Value>) -> Option<RelationKind> {
 
 fn assemble_relation(
     relation: &PendingRelation,
-    member_ways: &HashMap<i64, Vec<(f64, f64)>>,
+    member_ways: &WayGeometryStore,
 ) -> Option<SourceFeature> {
     let geometry = match relation.kind {
         RelationKind::MultiPolygon => assemble_multipolygon(relation, member_ways)?,
@@ -457,23 +487,23 @@ fn assemble_relation(
     Some(SourceFeature {
         id: feature_id(relation.id, RELATION_KIND),
         geometry,
-        tags: relation.tags.clone(),
+        tags: relation.decode_tags(),
         relations: Vec::new(),
     })
 }
 
 fn assemble_multipolygon(
     relation: &PendingRelation,
-    member_ways: &HashMap<i64, Vec<(f64, f64)>>,
+    member_ways: &WayGeometryStore,
 ) -> Option<Geometry<f64>> {
     let mut outer_fragments = Vec::new();
     let mut inner_fragments = Vec::new();
     for &(way_id, is_inner) in &relation.members {
-        if let Some(coords) = member_ways.get(&way_id) {
+        if let Some(coords) = member_ways.get(way_id) {
             if is_inner {
-                inner_fragments.push(coords.clone());
+                inner_fragments.push(coords);
             } else {
-                outer_fragments.push(coords.clone());
+                outer_fragments.push(coords);
             }
         }
     }
@@ -505,14 +535,14 @@ fn assemble_multipolygon(
 
 fn assemble_route(
     relation: &PendingRelation,
-    member_ways: &HashMap<i64, Vec<(f64, f64)>>,
+    member_ways: &WayGeometryStore,
 ) -> Option<Geometry<f64>> {
     let lines: Vec<LineString<f64>> = relation
         .members
         .iter()
-        .filter_map(|&(way_id, _)| member_ways.get(&way_id))
+        .filter_map(|&(way_id, _)| member_ways.get(way_id))
         .filter(|coords| coords.len() >= 2)
-        .map(|coords| line_string(coords))
+        .map(|coords| line_string(&coords))
         .collect();
     (!lines.is_empty()).then_some(Geometry::MultiLineString(MultiLineString(lines)))
 }
@@ -693,17 +723,22 @@ mod tests {
             (0.0, 0.0),
         ];
         let inner = vec![(3.0, 3.0), (6.0, 3.0), (6.0, 6.0), (3.0, 6.0), (3.0, 3.0)];
-        let mut member_ways = HashMap::new();
-        member_ways.insert(1, outer);
-        member_ways.insert(2, inner);
+        let mut member_ways = WayGeometryStore::new().unwrap();
+        member_ways.put(1, &outer);
+        member_ways.put(2, &inner);
+        member_ways.finish().unwrap();
         let relation = PendingRelation {
             id: 7,
             kind: RelationKind::MultiPolygon,
-            tags: tags(&[("type", "multipolygon"), ("natural", "water")]),
+            tags: PendingRelation::encode_tags(&tags(&[
+                ("type", "multipolygon"),
+                ("natural", "water"),
+            ])),
             members: vec![(1, false), (2, true)],
         };
         let feature = assemble_relation(&relation, &member_ways).unwrap();
         assert_eq!(feature.id, feature_id(7, RELATION_KIND));
+        assert_eq!(feature.tags.get("natural"), Some(&Value::from("water")));
         match feature.geometry {
             Geometry::Polygon(p) => assert_eq!(p.interiors().len(), 1, "the inner ring is a hole"),
             other => panic!("expected polygon, got {other:?}"),
@@ -712,13 +747,14 @@ mod tests {
 
     #[test]
     fn route_relation_is_multilinestring() {
-        let mut member_ways = HashMap::new();
-        member_ways.insert(1, vec![(0.0, 0.0), (1.0, 1.0)]);
-        member_ways.insert(2, vec![(1.0, 1.0), (2.0, 2.0)]);
+        let mut member_ways = WayGeometryStore::new().unwrap();
+        member_ways.put(1, &[(0.0, 0.0), (1.0, 1.0)]);
+        member_ways.put(2, &[(1.0, 1.0), (2.0, 2.0)]);
+        member_ways.finish().unwrap();
         let relation = PendingRelation {
             id: 8,
             kind: RelationKind::Route,
-            tags: tags(&[("type", "route"), ("route", "bicycle")]),
+            tags: PendingRelation::encode_tags(&tags(&[("type", "route"), ("route", "bicycle")])),
             members: vec![(1, false), (2, false)],
         };
         let feature = assemble_relation(&relation, &member_ways).unwrap();
