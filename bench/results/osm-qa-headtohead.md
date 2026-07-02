@@ -70,6 +70,24 @@ Near-identical output (21472 vs 21340 tiles, 0.6%). The honest verdict at countr
 
 **Tried and reverted — decode/consume double-buffering:** a producer thread decoding window N+1 while the consumer processed window N measured **155 s and +1.2 GB RSS** (vs 153 s baseline). The rayon pool is already saturated (render flushes fill the cores between decode windows; user CPU *rose* 565→590 s from contention), so the overlap bought nothing and cost an extra in-flight window. Dropped rather than shipped.
 
+## Continent scale (europe, 34.6 GB, z12) — the honest reversal
+
+Both tools, same 96 GB / 12-core machine, same task (osm-qa z12). Ours ran with `--storage sparse --min-size 0 --simplify 0 --buffer 0`; Planetiler ran twice — stock defaults and a tuned big-build config.
+
+| tool | wall | peak RSS | tiles |
+|---|---|---|---|
+| planetiler-rs (sparse) | 53.3 min | **67.0 GB** | 739,799 |
+| Planetiler (stock defaults) | **17.7 min** | 74.9 GB | — |
+| Planetiler (-Xmx48g, mmap, sparsearray) | 18.6 min | 71.4 GB | 739,898 |
+
+- **Planetiler wins europe on this machine: ~2.9× faster, and the memory gap collapses to a near-wash** (67 vs 71–75 GB). Both complete without OOM — "defaults" on a 96 GB box mean a ~51 GB heap, and their architecture handles the rest. The GB-scale trend (1.9× slower at 5× less memory) did **not** hold at 17× the input.
+- **Why our memory advantage vanished:** the relation-capture structures (`member_ways` geometries, `needed_ways` ids, pending relation tags, all held in RAM through pass 2) scale with europe's relation count and dominate our 67 GB. Planetiler's own log shows the equivalent state at **`mpGeoms: 1.4G`** — the same job in ~1/20th the memory. That is the next architecture item, not a tuning knob.
+- **Why the time gap widened (1.9× → 2.9×):** our write stage alone took 25 min (625 M sorted entries through k-way merge into a single serial SQLite writer) — longer than Planetiler's entire run. Pass 2 (17.8 min) also roughly matches their total.
+- Tile counts agree within 0.013% (739,799 vs 739,898).
+- Caveats: development builds/tests shared the machine with both sides' runs (roughly symmetric noise, ±5%-ish); our first attempt failed on a silently-truncated download (curl exits 0 on early close — resume and verify `content-length` before trusting a 30 GB fetch).
+
+**Standing verdict across scales: we win city (~5×) and state (~2.2×) on time and memory; at country we're 1.9× slower at 5× less memory; at continent Planetiler wins outright.** The two named fixes (relation-capture memory, parallel/partitioned archive write) are what the next optimization arc is for.
+
 ## Output parity (monaco, z12-14, via `bench compare`)
 
 Measured with the parity oracle (`bench compare ours.mbtiles java.mbtiles`), which decodes both archives and reports tile-set overlap + per-tile semantic equality. Progress from the initial "wildly different" state:
