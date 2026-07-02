@@ -86,7 +86,34 @@ Both tools, same 96 GB / 12-core machine, same task (osm-qa z12). Ours ran with 
 - Tile counts agree within 0.013% (739,799 vs 739,898).
 - Caveats: development builds/tests shared the machine with both sides' runs (roughly symmetric noise, ±5%-ish); our first attempt failed on a silently-truncated download (curl exits 0 on early close — resume and verify `content-length` before trusting a 30 GB fetch).
 
-**Standing verdict across scales: we win city (~5×) and state (~2.2×) on time and memory; at country we're 1.9× slower at 5× less memory; at continent Planetiler wins outright.** The two named fixes (relation-capture memory, parallel/partitioned archive write) are what the next optimization arc is for.
+## Continent scale, round 2 — the two named fixes land
+
+The next optimization arc shipped both fixes the first europe run named, each verified byte-identical (sqlite tile-content sha256) on monaco, rhode-island, and great-britain before merging:
+
+- **Parallel archive write** — the write stage was one thread doing k-way merge, per-entry blob decode, tile assembly, encode, *and* SQLite inserts. It is now a three-stage pipeline over bounded channels: a merge thread groups sorted entries into whole tiles (per-tile-layer cap applied before any decode), the rayon pool decodes + post-processes + encodes + compresses batches, and the writer stays serial in merge order — output identical by construction. MBTiles dedup switched from keying on whole compressed blobs (an unnamed third memory hog: it held every unique tile in RAM, ~20 GB at this scale) to a 128-bit xxh3 content hash, with cached prepared statements and one archive-wide transaction.
+- **Relation capture off the heap** — member-way geometries stream to a file-backed `WayGeometryStore` (packed 8-byte fixed-point records, the node stores' 1e-7 packing, so coordinates survive bit-identically; a 16-byte id+span index on the heap; mmap lookups), `needed_ways` became a sorted `Vec<i64>`, and pending relation tags are held postcard-encoded until assembly.
+
+Same machine, same command, same input as round 1:
+
+| europe z12 (sparse) | round 1 | round 2 | Planetiler (stock) |
+|---|---|---|---|
+| pass 1 (nodes) | 369 s | 382 s | — |
+| pass 2 (ways) | 1066 s | 1028 s | — |
+| relations + render tail | ~255 s | ~303 s | — |
+| merge + encode + write | 1508 s | **780 s (−48%)** | — |
+| **total wall** | **53.3 min** | **41.6 min (−22%)** | **17.7 min** |
+| peak RSS | 67.0 GB | **53.3 GB (−20%)** | 74.9 GB |
+| peak memory footprint | 41.8 GB | **17.1 GB (−59%)** | 32.4 GB |
+| tiles | 739,799 | 739,799 | 739,898 |
+
+**Output is byte-identical to round 1 across all 739,799 tiles** (identical content sha256 over 24 GB of tiles), so this is pure performance, zero behavior change.
+
+The verdict moves meaningfully:
+
+- **Memory is a win again, not a wash.** RSS 53.3 vs Java's 71–75 GB (~1.4× less); honest dirty memory (footprint) 17.1 vs 32.4 GB (~1.9× less, and ~3.5× less than Java's tuned run at 59 GB). Much of our remaining RSS is clean, evictable mmap pages of the 27 GB sparse node-store file — on a smaller machine the kernel drops them instead of OOMing, which is the architectural point.
+- **Time gap narrows 2.9× → ~2.3×.** The write stage halved; its floor is now the single merge thread (~0.9 µs/entry over 625 M entries ≈ 9.5 of the 13 min). A partitioned/parallel merge is the obvious next lever, then pass 2 (17 min, ~matches Java's whole run).
+
+**Standing verdict across scales: we win city (~5×) and state (~2.2×) on time and memory; at country we're 1.9× slower at ~5× less memory; at continent we're ~2.3× slower at ~1.4× less RSS / ~2× less dirty memory.** Continent is no longer an outright loss — it's the same shape as country: a time gap that is throughput headroom, on top of a standing memory win.
 
 ## Output parity (monaco, z12-14, via `bench compare`)
 
