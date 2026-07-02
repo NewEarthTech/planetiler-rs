@@ -11,7 +11,7 @@
 //! default, or an off-heap mmap store for planet scale; a compact `sparsearray`
 //! variant is future work.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use geo_types::{
@@ -412,14 +412,20 @@ fn assemble_rings(fragments: Vec<Vec<(f64, f64)>>) -> Vec<Vec<(f64, f64)>> {
         .filter(|f| f.len() >= 2)
         .map(Some)
         .collect();
-    let mut by_endpoint: HashMap<(u64, u64), Vec<usize>> = HashMap::new();
+    // Candidates stay in fragment order and are consumed from the front, so an
+    // ambiguous junction (>2 fragments sharing an endpoint) picks the same
+    // fragment the old first-match linear scan did — output is unchanged.
+    let mut by_endpoint: HashMap<(u64, u64), VecDeque<usize>> = HashMap::new();
     for (index, fragment) in slots.iter().enumerate() {
         let fragment = fragment.as_ref().unwrap();
-        by_endpoint.entry(key(fragment[0])).or_default().push(index);
+        by_endpoint
+            .entry(key(fragment[0]))
+            .or_default()
+            .push_back(index);
         by_endpoint
             .entry(key(*fragment.last().unwrap()))
             .or_default()
-            .push(index);
+            .push_back(index);
     }
 
     let mut rings = Vec::new();
@@ -434,9 +440,9 @@ fn assemble_rings(fragments: Vec<Vec<(f64, f64)>>) -> Vec<Vec<(f64, f64)>> {
             let end_key = key(*ring.last().unwrap());
             let next_index = match by_endpoint.get_mut(&end_key) {
                 Some(candidates) => loop {
-                    match candidates.last() {
+                    match candidates.front() {
                         Some(&candidate) if slots[candidate].is_none() => {
-                            candidates.pop(); // consumed earlier; drop lazily
+                            candidates.pop_front(); // consumed earlier; drop lazily
                         }
                         Some(&candidate) => break Some(candidate),
                         None => break None,
