@@ -232,12 +232,17 @@ pub fn read_osm(path: impl AsRef<Path>) -> Result<Vec<SourceFeature>> {
 /// Read the `.osm.pbf` header's bounding box (lon/lat `west, south, east,
 /// north`), if present — the natural default tile bounds, matching Planetiler.
 pub fn osm_bounds(path: &Path) -> Result<Option<(f64, f64, f64, f64)>> {
-    let mut reader =
-        osmpbf::BlobReader::from_path(path).map_err(|_| Error::Source("cannot open OSM PBF"))?;
+    let mut reader = osmpbf::BlobReader::from_path(path).map_err(|e| Error::SourceDetail {
+        context: "cannot open OSM PBF",
+        message: e.to_string(),
+    })?;
     let Some(blob) = reader.next() else {
         return Ok(None);
     };
-    let blob = blob.map_err(|_| Error::Source("cannot read OSM PBF header"))?;
+    let blob = blob.map_err(|e| Error::SourceDetail {
+        context: "cannot read OSM PBF header",
+        message: e.to_string(),
+    })?;
     let Ok(header) = blob.to_headerblock() else {
         return Ok(None);
     };
@@ -272,14 +277,19 @@ where
     C: FnMut(T) -> Result<()>,
 {
     const WINDOW: usize = 64;
-    let mut reader =
-        BlobReader::from_path(path).map_err(|_| Error::Source("cannot open OSM PBF"))?;
+    let mut reader = BlobReader::from_path(path).map_err(|e| Error::SourceDetail {
+        context: "cannot open OSM PBF",
+        message: e.to_string(),
+    })?;
     loop {
         let window: Vec<Blob> = reader
             .by_ref()
             .take(WINDOW)
             .collect::<std::result::Result<_, _>>()
-            .map_err(|_| Error::Source("failed to read OSM PBF"))?;
+            .map_err(|e| Error::SourceDetail {
+                context: "failed to read OSM PBF",
+                message: e.to_string(),
+            })?;
         if window.is_empty() {
             break;
         }
@@ -288,7 +298,10 @@ where
             .map(|blob| match blob.decode() {
                 Ok(BlobDecode::OsmData(block)) => Ok(Some(decode(&block))),
                 Ok(_) => Ok(None),
-                Err(_) => Err(Error::Source("failed to decode OSM PBF block")),
+                Err(e) => Err(Error::SourceDetail {
+                    context: "failed to decode OSM PBF block",
+                    message: e.to_string(),
+                }),
             })
             .collect::<Result<_>>()?;
         for output in outputs.into_iter().flatten() {
