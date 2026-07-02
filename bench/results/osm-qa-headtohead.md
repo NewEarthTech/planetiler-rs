@@ -2,17 +2,20 @@
 
 Task: read an `.osm.pbf` extract and write all OSM features into a single `osm` layer as MBTiles, at the `osm-qa` zoom range **z12–14**. Measured with `bench measure` (`/usr/bin/time`) on a 12-core macOS machine (OpenJDK 26), default gzip tiles. Both tools at default settings (no heap tuning, no thread pinning).
 
-## Results across two extract sizes
+## Results across three extract sizes (after the optimization rounds below)
 
 | extract | tool | wall | peak RSS | tiles |
 |---------|------|-----:|---------:|------:|
-| **monaco** (0.7 MB) | planetiler-rs | **0.089 s** | **69 MB** | 175 |
+| **monaco** (0.7 MB, z12-14) | planetiler-rs | **0.41 s** | **84 MB** | 102 |
 | | Planetiler | 2.20 s | 1068 MB | 102 |
-| **rhode-island** (49 MB) | planetiler-rs (ram) | **7.1 s** | 1025 MB | 2217 |
-| | planetiler-rs (mmap) | 7.7 s | **944 MB** | 2217 |
+| **rhode-island** (49 MB, z12-14) | planetiler-rs (ram) | **4.2 s** | 1138 MB | 2217 |
+| | planetiler-rs (sparse) | **4.0 s** | **1088 MB** | 2217 |
 | | Planetiler | 8.94 s | 7814 MB | 2203 |
+| **great-britain** (2.0 GB, z12) | planetiler-rs (ram) | 151 s | 7.6 GB | 21472 |
+| | planetiler-rs (sparse) | 153 s | **5.8 GB** | 21472 |
+| | Planetiler | **81 s** | 29.1 GB | 21340 |
 
-**Speed:** ~25× faster on monaco → **~1.25× faster** on rhode-island. **Memory:** ~15× less on monaco → **~7.6–8.3× less** on rhode-island (ram/mmap). **Tiles now match**: 2217 vs 2203 (was 7522 — relations + source-bounds clipping closed it).
+**Speed:** ~5× faster (monaco), ~2.2× faster (rhode-island), **1.9× slower (great-britain)** — the crossover where Java's mature parallel throughput overtakes ours now sits between state and country scale (it was "anything bigger than a city" before the optimization rounds). **Memory:** ~13× / ~7× / ~5× less. **Tile counts match at every size** (relations + source-bounds clipping closed them; per-tile content ~50% semantically identical on monaco, the rest sub-pixel — see parity section).
 
 ## Reading the trend (honest)
 
@@ -63,7 +66,9 @@ Near-identical output (21472 vs 21340 tiles, 0.6%). The honest verdict at countr
 - **Round 2 — parallel PBF decode (250→153 s):** both passes decoded the file single-threaded (`osmpbf::for_each`), twice. Blobs are now read sequentially but decoded in parallel windows of 64 with ordered consumption — node ids stay ascending (the sparse store's invariant), feature emission stays deterministic, and the way pass shares the finished node store read-only across workers so location lookups parallelize too.
 - **Every round verified byte-identical** (same entries/features/tiles on GB: 24638633 / 43348118 / 21472; monaco 102/102).
 
-**Net: the time gap vs Planetiler fell 4.1× → 1.9×** (153 s vs 81 s) **at ~5× less memory** (5.8 GB vs 29.1 GB). Remaining fat: pass 2's serial consume between decode windows (~66 s), the relation stage (~27 s), and the write stage (~37 s) — pipelining decode/consume overlap is the next candidate.
+**Net: the time gap vs Planetiler fell 4.1× → 1.9×** (153 s vs 81 s) **at ~5× less memory** (5.8 GB vs 29.1 GB). Remaining fat: pass 2 (~66 s), the relation stage (~27 s), and the write stage (~37 s).
+
+**Tried and reverted — decode/consume double-buffering:** a producer thread decoding window N+1 while the consumer processed window N measured **155 s and +1.2 GB RSS** (vs 153 s baseline). The rayon pool is already saturated (render flushes fill the cores between decode windows; user CPU *rose* 565→590 s from contention), so the overlap bought nothing and cost an extra in-flight window. Dropped rather than shipped.
 
 ## Output parity (monaco, z12-14, via `bench compare`)
 
