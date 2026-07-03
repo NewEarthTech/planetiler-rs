@@ -4,20 +4,23 @@
 //! which runs it through a [`Profile`] into a [`FeatureCollector`]; batches are
 //! rendered into per-tile pieces across cores, serialized into
 //! [`model::Entry`](crate::model) records keyed by sort key, and fed to an
-//! [`ExternalMergeSort`]. The sorted entries are then streamed, grouped into
-//! whole tiles, and encoded + compressed in parallel before the single writer
-//! inserts them. Peak memory is bounded by one render batch, the sort buffer,
-//! and (for OSM) the node store — never the whole input or all tiles.
+//! [`ExternalMergeSort`]. The sorted key space is then split into tile-aligned
+//! partitions that merge in parallel into whole tiles, encoded + compressed
+//! across cores, and inserted by the single writer in key order. Peak memory
+//! is bounded by one render batch, the sort buffer, and (for OSM) the node
+//! store — never the whole input or all tiles.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, mpsc};
+use std::time::Duration;
 
 use geo_types::Geometry;
 use rayon::prelude::*;
 
 use crate::archive::{ArchiveWriter, FieldType, TileArchiveMetadata, TileCompression, VectorLayer};
-use crate::collection::ExternalMergeSort;
+use crate::collection::{ExternalMergeSort, SortedPartition};
 use crate::error::{Error, Result};
 use crate::geom::TileCoord;
 use crate::model::{Entry, MAX_LAYER, SortKey, Value};
@@ -232,14 +235,20 @@ struct RawTile {
     entries: Vec<Entry>,
 }
 
+// Tiles per encode batch; a batch also flushes past an entry budget so a
+// run of dense tiles can't accumulate unbounded before hand-off.
+const BATCH_TILES: usize = 256;
+const BATCH_ENTRIES: usize = 1 << 18;
+
 /// Stream the sorted entries and write finished tiles, overlapping three
-/// stages: a merge thread runs the k-way merge and splits the stream into
-/// whole tiles at key boundaries (applying the per-tile-layer cap before any
-/// blob is decoded), batches of tiles are decoded + post-processed + encoded +
-/// compressed across the rayon pool, and the calling thread inserts the
-/// finished blobs serially, in merge order — so output is identical to a
-/// fully serial write. Bounded channels keep only a few batches in flight,
-/// bounding memory regardless of archive size.
+/// stages: merge workers each k-way merge one tile-aligned partition of the
+/// sorted key space and split it into whole tiles (applying the per-tile-layer
+/// cap before any blob is decoded), batches of tiles are decoded +
+/// post-processed + encoded + compressed across the rayon pool, and the
+/// calling thread inserts the finished blobs serially. Partitions are consumed
+/// strictly in key order, so the tile stream — and the archive — is identical
+/// to a fully serial merge and write. Bounded channels keep only a few batches
+/// in flight per partition, bounding memory regardless of archive size.
 fn write_sorted_tiles(
     sort: ExternalMergeSort,
     registry: &LayerRegistry,
@@ -249,94 +258,99 @@ fn write_sorted_tiles(
     max_features_per_tile: usize,
     writer: &mut ArchiveWriter,
 ) -> Result<usize> {
-    // Tiles per encode batch; a batch also flushes past an entry budget so a
-    // run of dense tiles can't accumulate unbounded before hand-off.
-    const BATCH_TILES: usize = 256;
-    const BATCH_ENTRIES: usize = 1 << 18;
-    // Batches in flight per hand-off: enough to keep every stage busy, small
-    // enough to cap the pipeline's working set.
+    // Batches in flight on the encoded hand-off: enough to keep the writer
+    // busy, small enough to cap the pipeline's working set.
     const CHANNEL_DEPTH: usize = 2;
 
-    let (raw_tx, raw_rx) = mpsc::sync_channel::<Vec<RawTile>>(CHANNEL_DEPTH);
+    // More partitions than merge workers so an unevenly heavy partition (the
+    // quantiles are estimates, and a mega-tile is indivisible) is amortized by
+    // work stealing rather than serializing the tail — but never so many that
+    // a partition is smaller than one encode batch, which would fragment the
+    // encode stage's parallelism on small inputs.
+    let threads = rayon::current_num_threads();
+    let by_size = sort.len() / (BATCH_ENTRIES as u64);
+    let target = by_size.min(threads.saturating_mul(4) as u64).max(1) as usize;
+    let partitions = sort.into_sorted_partitions(target)?;
+    let partition_count = partitions.len();
+    // The merge is lighter than encode, so give it half the cores; encode
+    // keeps the whole rayon pool.
+    let merge_workers = partition_count.min((threads / 2).max(1));
+
+    let mut senders = Vec::with_capacity(partition_count);
+    let mut receivers = Vec::with_capacity(partition_count);
+    for _ in 0..partition_count {
+        // Depth 1 is a classic double buffer per active partition: one batch
+        // queued while the worker builds the next.
+        let (tx, rx) = mpsc::sync_channel::<Vec<RawTile>>(1);
+        senders.push(tx);
+        receivers.push(rx);
+    }
+    // Workers claim partitions (and their senders) in ascending order; each
+    // sender drops when its partition finishes, closing that channel.
+    type PartitionSlot = Option<(SortedPartition, mpsc::SyncSender<Vec<RawTile>>)>;
+    let slots: Mutex<Vec<PartitionSlot>> =
+        Mutex::new(partitions.into_iter().zip(senders).map(Some).collect());
+    let next_partition = AtomicUsize::new(0);
+    let dropped_total = AtomicU64::new(0);
+    // Claiming window: a worker may not *start* partition `i` until the
+    // encoder has fully drained partition `i - merge_workers`. Without it,
+    // workers whose partitions fit inside the channel buffer race ahead and
+    // pre-buffer future partitions — on inputs where partitions are only a
+    // couple of batches long, that buffered nearly the whole dataset
+    // (measured +1.8 GB RSS on great-britain).
+    let window = PartitionWindow::new();
+
     let (encoded_tx, encoded_rx) = mpsc::sync_channel::<Vec<(TileCoord, Vec<u8>)>>(CHANNEL_DEPTH);
 
     std::thread::scope(|scope| {
-        // Stage 1: merge + group by tile. Touches only sort keys, never blobs.
-        let merger = scope.spawn(move || -> Result<u64> {
-            let mut dropped = 0u64;
-            let mut batch: Vec<RawTile> = Vec::new();
-            let mut batch_entries = 0usize;
-            let mut current: Option<RawTile> = None;
-            // Kept-feature count for the current tile's current layer. Entries
-            // within a tile arrive layer-contiguous (the layer sits above the
-            // zorder in the sort key), so one counter implements the cap.
-            let mut layer_seen = (0u8, 0usize);
-            for entry in sort.into_sorted()? {
-                let entry = entry?;
-                let tile = entry.key.tile();
-                if current.as_ref().map(|raw| raw.coord) != Some(tile) {
-                    if let Some(done) = current.take() {
-                        batch_entries += done.entries.len();
-                        batch.push(done);
-                        if batch.len() >= BATCH_TILES || batch_entries >= BATCH_ENTRIES {
-                            if raw_tx.send(std::mem::take(&mut batch)).is_err() {
-                                // A downstream stage hung up after failing; its
-                                // error is the one worth reporting.
-                                return Ok(dropped);
-                            }
-                            batch_entries = 0;
+        // Stage 1: merge workers. Each drains whole partitions in claim order,
+        // touching only sort keys, never blobs. The claiming window plus the
+        // depth-1 channels bound in-flight batches to ~2 per worker.
+        let mergers: Vec<_> = (0..merge_workers)
+            .map(|_| {
+                scope.spawn(|| -> Result<()> {
+                    loop {
+                        let index = next_partition.fetch_add(1, Ordering::Relaxed);
+                        if index >= partition_count {
+                            return Ok(());
                         }
+                        window.wait_to_start(index, merge_workers);
+                        let (partition, tx) = slots.lock().expect("partition slots lock")[index]
+                            .take()
+                            .expect("each partition is claimed once");
+                        let dropped = merge_partition(partition, max_features_per_tile, &tx)?;
+                        dropped_total.fetch_add(dropped, Ordering::Relaxed);
                     }
-                    current = Some(RawTile {
-                        coord: tile,
-                        entries: Vec::new(),
-                    });
-                    layer_seen = (0, 0);
-                }
-                // Cap kept features per tile-layer so a low-zoom mega-tile
-                // can't decode millions of features downstream. Entries arrive
-                // in sort order, so the first `max_features_per_tile` are kept
-                // deterministically and the rest skipped without decoding.
-                if max_features_per_tile != 0 {
-                    let layer = entry.key.layer();
-                    if layer_seen.0 != layer {
-                        layer_seen = (layer, 0);
-                    }
-                    if layer_seen.1 >= max_features_per_tile {
-                        dropped += 1;
-                        continue;
-                    }
-                    layer_seen.1 += 1;
-                }
-                current
-                    .as_mut()
-                    .expect("current tile is set at the boundary above")
-                    .entries
-                    .push(entry);
-            }
-            if let Some(done) = current.take() {
-                batch.push(done);
-            }
-            if !batch.is_empty() {
-                let _ = raw_tx.send(batch);
-            }
-            Ok(dropped)
-        });
+                })
+            })
+            .collect();
 
         // Stage 2: decode + post-process + encode + compress each batch across
-        // the rayon pool. The parallel collect preserves tile order.
+        // the rayon pool, consuming partitions strictly in key order. The
+        // parallel collect preserves tile order within a batch. However this
+        // stage exits, the window opens so no worker stays parked, and the
+        // owned sender drops so the writer sees the channel close.
+        let window_ref = &window;
         let encoder = scope.spawn(move || -> Result<()> {
-            while let Ok(batch) = raw_rx.recv() {
-                let encoded = batch
-                    .into_par_iter()
-                    .map(|raw| encode_raw_tile(raw, registry, profile, extent, compression))
-                    .collect::<Result<Vec<Option<(TileCoord, Vec<u8>)>>>>()?;
-                let encoded: Vec<(TileCoord, Vec<u8>)> = encoded.into_iter().flatten().collect();
-                if encoded_tx.send(encoded).is_err() {
-                    return Ok(()); // the writer failed; its error wins
+            let result = (|| -> Result<()> {
+                for (index, rx) in receivers.into_iter().enumerate() {
+                    while let Ok(batch) = rx.recv() {
+                        let encoded = batch
+                            .into_par_iter()
+                            .map(|raw| encode_raw_tile(raw, registry, profile, extent, compression))
+                            .collect::<Result<Vec<Option<(TileCoord, Vec<u8>)>>>>()?;
+                        let encoded: Vec<(TileCoord, Vec<u8>)> =
+                            encoded.into_iter().flatten().collect();
+                        if encoded_tx.send(encoded).is_err() {
+                            return Ok(()); // the writer failed; its error wins
+                        }
+                    }
+                    window_ref.mark_drained(index + 1);
                 }
-            }
-            Ok(())
+                Ok(())
+            })();
+            window_ref.open_wide();
+            result
         });
 
         // Stage 3 (this thread): the serial archive writer.
@@ -352,9 +366,12 @@ fn write_sorted_tiles(
             }
         }
 
-        let dropped = merger.join().expect("merge stage panicked")?;
+        for merger in mergers {
+            merger.join().expect("merge worker panicked")?;
+        }
         encoder.join().expect("encode stage panicked")?;
         write_result?;
+        let dropped = dropped_total.load(Ordering::Relaxed);
         if dropped > 0 {
             tracing::info!(
                 dropped,
@@ -364,6 +381,119 @@ fn write_sorted_tiles(
         }
         Ok(tiles_written)
     })
+}
+
+/// Gate on how far ahead the merge workers may run: partition `i` may start
+/// only once the encoder has fully drained partition `i - size`, capping
+/// in-flight batches at roughly two per worker regardless of how partition
+/// sizes compare to channel depth. The wait is timed, so a panicked peer
+/// degrades into one-second polling instead of parking a worker forever.
+struct PartitionWindow {
+    drained: Mutex<usize>,
+    ready: Condvar,
+}
+
+impl PartitionWindow {
+    fn new() -> Self {
+        Self {
+            drained: Mutex::new(0),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn wait_to_start(&self, index: usize, size: usize) {
+        let mut drained = self.drained.lock().expect("window lock");
+        while index >= drained.saturating_add(size) {
+            let (guard, _) = self
+                .ready
+                .wait_timeout(drained, Duration::from_secs(1))
+                .expect("window lock");
+            drained = guard;
+        }
+    }
+
+    /// Record that every partition below `upto` has been fully consumed.
+    fn mark_drained(&self, upto: usize) {
+        let mut drained = self.drained.lock().expect("window lock");
+        *drained = (*drained).max(upto);
+        drop(drained);
+        self.ready.notify_all();
+    }
+
+    /// Release every waiter (used on any encoder exit, clean or not).
+    fn open_wide(&self) {
+        self.mark_drained(usize::MAX);
+    }
+}
+
+/// Drain one partition of the sorted stream: k-way merge its entries, group
+/// them into whole tiles at key boundaries (partitions are tile-aligned, so a
+/// tile never spans two), apply the per-tile-layer cap before any blob is
+/// decoded, and hand tile batches to the encode stage. Returns how many
+/// entries the cap dropped. A send failure means a downstream stage hung up
+/// after failing — its error is the one worth reporting, so this returns
+/// cleanly.
+fn merge_partition(
+    partition: SortedPartition,
+    max_features_per_tile: usize,
+    tx: &mpsc::SyncSender<Vec<RawTile>>,
+) -> Result<u64> {
+    let mut dropped = 0u64;
+    let mut batch: Vec<RawTile> = Vec::new();
+    let mut batch_entries = 0usize;
+    let mut current: Option<RawTile> = None;
+    // Kept-feature count for the current tile's current layer. Entries
+    // within a tile arrive layer-contiguous (the layer sits above the
+    // zorder in the sort key), so one counter implements the cap.
+    let mut layer_seen = (0u8, 0usize);
+    for entry in partition.open()? {
+        let entry = entry?;
+        let tile = entry.key.tile();
+        if current.as_ref().map(|raw| raw.coord) != Some(tile) {
+            if let Some(done) = current.take() {
+                batch_entries += done.entries.len();
+                batch.push(done);
+                if batch.len() >= BATCH_TILES || batch_entries >= BATCH_ENTRIES {
+                    if tx.send(std::mem::take(&mut batch)).is_err() {
+                        return Ok(dropped);
+                    }
+                    batch_entries = 0;
+                }
+            }
+            current = Some(RawTile {
+                coord: tile,
+                entries: Vec::new(),
+            });
+            layer_seen = (0, 0);
+        }
+        // Cap kept features per tile-layer so a low-zoom mega-tile
+        // can't decode millions of features downstream. Entries arrive
+        // in sort order, so the first `max_features_per_tile` are kept
+        // deterministically and the rest skipped without decoding.
+        if max_features_per_tile != 0 {
+            let layer = entry.key.layer();
+            if layer_seen.0 != layer {
+                layer_seen = (layer, 0);
+            }
+            if layer_seen.1 >= max_features_per_tile {
+                dropped += 1;
+                continue;
+            }
+            layer_seen.1 += 1;
+        }
+        current
+            .as_mut()
+            .expect("current tile is set at the boundary above")
+            .entries
+            .push(entry);
+    }
+    if let Some(done) = current.take() {
+        batch.push(done);
+    }
+    if !batch.is_empty() {
+        let _ = tx.send(batch);
+    }
+    Ok(dropped)
 }
 
 /// Decode one grouped tile's entries into layers, run the profile's tile-space

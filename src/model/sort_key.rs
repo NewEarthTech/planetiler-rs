@@ -141,6 +141,15 @@ impl SortKey {
         TileCoord::new(self.z(), self.x(), self.y())
             .expect("sort key encodes a valid tile coordinate")
     }
+
+    /// The smallest key of this key's tile — layer, z-order, and reserved bits
+    /// cleared. All keys of a tile share one floor and sort at or above it, so
+    /// boundaries of this form never split a tile; the external sort uses them
+    /// to partition its key space at tile granularity.
+    #[inline]
+    pub fn tile_floor(self) -> Self {
+        Self(self.0 & !((1u64 << Y_SHIFT) - 1))
+    }
 }
 
 #[cfg(test)]
@@ -217,5 +226,23 @@ mod tests {
     fn reserved_bits_are_zero() {
         let k = SortKey::new(tile(15, 32767, 32767), MAX_LAYER, ZORDER_MAX).unwrap();
         assert_eq!(k.to_bits() & ((1 << RESERVED_BITS) - 1), 0);
+    }
+
+    #[test]
+    fn tile_floor_bounds_every_key_of_the_tile() {
+        let t = tile(12, 100, 200);
+        let k = SortKey::new(t, 3, 77).unwrap();
+        let floor = k.tile_floor();
+        assert_eq!(floor, SortKey::new(t, 0, ZORDER_MIN).unwrap());
+        assert!(floor <= k);
+        assert_eq!(floor.tile(), t);
+
+        // The next tile's floor sits strictly above this tile's largest key,
+        // so a floor boundary can never split a tile.
+        let max_key = SortKey::new(t, MAX_LAYER, ZORDER_MAX).unwrap();
+        let next_floor = SortKey::new(tile(12, 100, 201), 5, -9)
+            .unwrap()
+            .tile_floor();
+        assert!(max_key < next_floor);
     }
 }
