@@ -6,6 +6,9 @@ description = "A Rust port of Planetiler: fast, low-memory vector tile generatio
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/johncarmack1984/planetiler-rs"
 default-run = "planetiler-rs"
+# The crates.io tarball is the library + binaries; the dashboard site, the
+# benchmark corpus, and the parity harness live in the repo only.
+exclude = ["site/", "bench/", "parity/", "docs/", ".github/"]
 
 [dependencies]
 thiserror = "2"
