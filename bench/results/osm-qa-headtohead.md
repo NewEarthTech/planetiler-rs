@@ -93,6 +93,19 @@ The next optimization arc shipped both fixes the first europe run named, each ve
 - **Parallel archive write** — the write stage was one thread doing k-way merge, per-entry blob decode, tile assembly, encode, *and* SQLite inserts. It is now a three-stage pipeline over bounded channels: a merge thread groups sorted entries into whole tiles (per-tile-layer cap applied before any decode), the rayon pool decodes + post-processes + encodes + compresses batches, and the writer stays serial in merge order — output identical by construction. MBTiles dedup switched from keying on whole compressed blobs (an unnamed third memory hog: it held every unique tile in RAM, ~20 GB at this scale) to a 128-bit xxh3 content hash, with cached prepared statements and one archive-wide transaction.
 - **Relation capture off the heap** — member-way geometries stream to a file-backed `WayGeometryStore` (packed 8-byte fixed-point records, the node stores' 1e-7 packing, so coordinates survive bit-identically; a 16-byte id+span index on the heap; mmap lookups), `needed_ways` became a sorted `Vec<i64>`, and pending relation tags are held postcard-encoded until assembly.
 
+Each was A/B'd on great-britain z12 before it shipped, branch against its own main in the same session:
+
+| great-britain z12 (sparse) | before parallel write | + parallel write | + relation capture off heap |
+|---|---|---|---|
+| merge + encode + write | 61.0 s | **41.1 s (−33%)** | — |
+| total wall | 173.8 s | **150.9 s (−13%)** | 153.8 s (flat, within noise) |
+| peak RSS | 7.18 GB | **5.64 GB (−21%)** | **5.14 GB** |
+| peak footprint | 3.50 GB | **2.36 GB (−33%)** | **1.80 GB (−24%)** |
+
+Read down a column, not across the table: each pair is its own session, and the machine was not equally quiet in both. The parallel-write session's own main measured **173.8 s** for the same code the round-3 table above recorded at **153 s** — a 14% spread on identical binaries, which is the honest size of the noise floor on this shared box and the reason every perf claim here is a same-session A/B rather than a comparison against a number from another day. The off-heap relation move is deliberately flat on wall time: great-britain's relation state is small, and europe is what it was built for.
+
+Note that the head-to-head table at the top of this file predates both fixes on great-britain — its 153 s / 5.8 GB row was measured before them, so it now understates our memory position there (post-fix RSS is 5.14 GB). Refreshing it needs a fresh GB run against the pinned jar, not a splice of these branch-vs-main deltas into a cross-tool table.
+
 Same machine, same command, same input as round 1:
 
 | europe z12 (sparse) | round 1 | round 2 | Planetiler (stock) |
