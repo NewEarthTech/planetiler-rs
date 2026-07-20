@@ -95,6 +95,23 @@ impl ExternalMergeSort {
             });
         }
         self.spill()?;
+        // Every chunk stays open for the whole merge, so the chunk count is a
+        // file-descriptor floor. A default `ulimit -n` of 1024 is below what a
+        // planet-scale sort produces, and the failure lands *after* the entire
+        // read/render stage — so say the number out loud, and say it early
+        // enough to be worth acting on.
+        tracing::info!(
+            chunks = self.chunks.len(),
+            entries = self.len,
+            "k-way merge opening spilled chunks"
+        );
+        if self.chunks.len() >= 900 {
+            tracing::warn!(
+                chunks = self.chunks.len(),
+                "chunk count is near a default 1024 fd limit; raise `ulimit -n` \
+                 or `--sort-memory-mb` or the merge will fail on open"
+            );
+        }
         let mut heap = BinaryHeap::with_capacity(self.chunks.len());
         let mut readers = Vec::with_capacity(self.chunks.len());
         for (index, path) in self.chunks.iter().enumerate() {
