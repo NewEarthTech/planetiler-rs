@@ -21,6 +21,26 @@ These are load-bearing; an unfair benchmark is worse than none. Full rationale i
 5. **Report `mmap` and `ram` storage separately**: mmap hides node-store bytes from RSS and skews the memory comparison.
 6. **Compare decompressed tile payloads** (upstream gzips + dedups by default), and diff semantically unless byte-determinism is confirmed on the pinned version.
 
+## Dedicated cloud runs (`cloud/`)
+
+The laptop is a shared development machine, and a few-percent effect is invisible under its noise floor (`bench/results/` records a 14% spread on identical binaries between sessions). `cloud/run.sh` exists for measurements that need a quiet box: it launches a dedicated EC2 instance, runs a job on it, fetches the results, and terminates it.
+
+```sh
+cloud/run.sh <job> <ref-a> <ref-b> [rounds] [instance-type] [max-hours] [data-ebs-gb]
+cloud/run.sh gb-ab main perf/some-branch
+cloud/run.sh europe-ab main perf/some-branch 2 r7g.8xlarge 8 500
+```
+
+Jobs are `gb-ab` and `europe-ab`; both interleave rounds of ref-a against ref-b on one box and prove the two outputs match (a full content hash on great-britain, a per-tile signature on europe, where hashing 24 GB of tiles twice would dominate the run). `redispatch.sh <ip> ...` reuses a box that was kept alive; `remote.sh` is what executes on the instance.
+
+Operational notes that are load-bearing:
+
+- **One box per dataset, both refs on it.** Never split ref-a and ref-b across instances; you would be measuring the instances.
+- **`d`-suffix instance types** (`r7gd`, `i4g`) use local NVMe for `/data`. Types without instance store need `data-ebs-gb`, which provisions gp3 at 8000 IOPS / 500 MB/s. This matters more than it sounds: the europe run on gp3 spent 2601 s in stream/render/sort-feed against roughly 1410 s for the same stage on the laptop's local NVMe. **That run was disk-bound, and its wall time should not be read as a CPU result.**
+- **`TMPDIR` is pointed at `/data`.** All four scratch consumers (sort spill, node store, way-geometry store, PMTiles staging) use `tempfile`, which honours it. Left unset, hundreds of GB would land on the 30 GB root volume.
+- **Safety:** the instance schedules `shutdown -h +<max-hours>` at boot and shutdown means terminate, so a wedged run cannot idle for a weekend. SSH is opened to the launching IP only, and the repo travels as a git bundle so no credentials leave the laptop.
+- `cloud/results/` is git-ignored: those are per-run artifacts, and the numbers worth keeping belong in `bench/results/`.
+
 ## Regenerating reference tiles (example, once implemented)
 
 ```sh
