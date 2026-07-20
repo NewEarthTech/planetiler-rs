@@ -124,9 +124,39 @@ Same machine, same command, same input as round 1:
 The verdict moves meaningfully:
 
 - **Memory is a win again, not a wash.** RSS 53.3 vs Java's 71–75 GB (~1.4× less); honest dirty memory (footprint) 17.1 vs 32.4 GB (~1.9× less, and ~3.5× less than Java's tuned run at 59 GB). Much of our remaining RSS is clean, evictable mmap pages of the 27 GB sparse node-store file — on a smaller machine the kernel drops them instead of OOMing, which is the architectural point.
-- **Time gap narrows 2.9× → ~2.3×.** The write stage halved; its floor is now the single merge thread (~0.9 µs/entry over 625 M entries ≈ 9.5 of the 13 min). A partitioned/parallel merge is the obvious next lever, then pass 2 (17 min, ~matches Java's whole run).
+- **Time gap narrows 2.9× → ~2.3×.** The write stage halved; its floor is now the single merge thread (~0.9 µs/entry over 625 M entries ≈ 9.5 of the 13 min). A partitioned/parallel merge looks like the obvious next lever — it was built, measured on dedicated hardware, and **falsified**; see the section below. That leaves pass 2 (17 min, ~matches Java's whole run) as the standing named lever.
 
 **Standing verdict across scales: we win city (~5×) and state (~2.2×) on time and memory; at country we're 1.9× slower at ~5× less memory; at continent we're ~2.3× slower at ~1.4× less RSS / ~2× less dirty memory.** Continent is no longer an outright loss — it's the same shape as country: a time gap that is throughput headroom, on top of a standing memory win.
+
+## Tried and parked — partitioned merge (falsified on dedicated hardware)
+
+The write-stage section above names the single merge thread as the remaining floor and a partitioned merge as the obvious lever. It was built (tile-floor partitions, pread cursors, a claiming window to bound in-flight memory) and measured on dedicated cloud boxes rather than the shared laptop, because a few-percent effect is invisible under this machine's noise floor. **It is slower on both datasets and does not ship.** The branch stays parked as the receipt.
+
+**great-britain z12, r7gd.4xlarge (16 cores, instance-store NVMe), 3 interleaved rounds per side, best of 3:**
+
+| | main | partitioned merge |
+|---|---|---|
+| merge + encode + write | **67.7 s** | 71.1 s (+5.1%) |
+| total wall | **243.2 s** | 251.8 s (+3.5%) |
+| peak RSS | **4.02 GB** | 4.24 GB |
+
+**europe z12, r7g.8xlarge (32 cores, 500 GB gp3 at 8000 IOPS), 1 round per side:**
+
+| | main | partitioned merge |
+|---|---|---|
+| merge + encode + write | **834.9 s** | 848.7 s (+1.7%) |
+| total wall | **57:16** | 57:29 (+0.4%) |
+| peak RSS | 47.3 GB | 47.3 GB |
+
+The stage it set out to speed up got **slower on both boxes**, which is the whole finding: the change is byte-identical (great-britain tile-content hash `800f96337a281878` and metadata hash matched exactly on both sides, 21324/18544 rows) and memory-neutral, and still loses.
+
+Memory only came out neutral because of a second pass. The first revision (`ad9f0c6`, no claiming window) let workers whose partitions fit inside the channel buffer race ahead and pre-buffer future partitions, and great-britain measured **5.74 GB against main's 4.00 GB (+43%)** at 250.1 s vs 245.0 s. Adding the window — partition `i` may not start until the encoder has drained `i - workers` — put RSS back to 4.24 GB. Worth recording that the fix worked exactly as intended and the time regression survived it anyway, in fact widening from +2.1% to +3.5%: bounding the memory cost more coordination.
+
+**Why the hypothesis was wrong.** The "~9.5 of the 13 write-minutes are the merge thread" figure that motivated this was **arithmetic, not a measurement**: 0.9 µs/entry × 625 M entries. Per-entry cost times entry count tells you what a stage would take if nothing overlapped it; it is not evidence that the stage is the *blocking* one. The write pipeline already overlaps merge with encode and write across bounded channels, so partitioning bought parallelism on a stage that was not the constraint and paid coordination cost for it.
+
+**The rule this bought:** no parallelism work starts without a cheap instrumented run proving the target is actually on the critical path, on the hardware that matters. Probe first, build second. This experiment cost two cloud boxes and a branch to learn something a few minutes of stage-level instrumentation would have shown.
+
+Caveats on the two cells, so nobody re-reads them as stronger than they are: europe is **n=1 per side** (the runs were stopped once the direction was clear) and it tested the pre-claiming-window revision `ad9f0c6`; great-britain tested `08947ac`, which is code-identical to the parked branch head. **europe on instance-store NVMe is unmeasured** — that is the one cell where the result could plausibly differ, since gp3 and NVMe change what the merge cursors are waiting on.
 
 ## Output parity (monaco, z12-14, via `bench compare`)
 

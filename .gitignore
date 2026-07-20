@@ -17,3 +17,6 @@ CLAUDE.local.md
 
 # Planetiler's default scratch dir (spawned when benchmarking the jar from the repo root)
 /data/
+
+# Cloud benchmark run artifacts (fetched per run; curated numbers go to bench/results)
+parity/cloud/results/
