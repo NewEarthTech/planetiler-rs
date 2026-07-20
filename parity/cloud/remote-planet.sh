@@ -44,6 +44,10 @@ mountpoint -q /data || { echo "no /data mount" >&2; exit 1; }
 mkdir -p /data/tmp /data/out
 export TMPDIR=/data/tmp
 
+# The tracing filter defaults to info on its own, but be explicit so an
+# inherited RUST_LOG=warn on the box can't silence the stage timers.
+export RUST_LOG=${RUST_LOG:-info}
+
 # The k-way merge holds every spilled chunk open simultaneously. Planet
 # projects to ~300 chunks at --sort-memory-mb 1024 and ~1200 at the default,
 # against a stock soft limit of 1024 — and the open fails only after the whole
@@ -145,11 +149,14 @@ sample_and_guard() {  # $1 = pid to watch
 
 say "## planetiler-rs ($REF)"
 RS_START=$(date +%s)
+# planetiler-rs writes its tracing lines to STDOUT, not stderr, so capture
+# stdout (merging stderr in). The first cut sent stdout to /dev/null and kept
+# only stderr, which is why the run produced tiles but an empty log.
 "$BIN" generate \
   --source "$INPUT" --output /data/out/rs.mbtiles \
   --layer osm --minzoom 12 --maxzoom 12 \
   --storage sparse --sort-memory-mb 1024 \
-  --min-size 0 --simplify 0 --buffer 0 --force > /dev/null 2> "$RS_STDERR" &
+  --min-size 0 --simplify 0 --buffer 0 --force > "$RS_STDERR" 2>&1 &
 RS_PID=$!
 sample_and_guard "$RS_PID" &
 MON_PID=$!
