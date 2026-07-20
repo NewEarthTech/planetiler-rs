@@ -320,7 +320,37 @@ impl SparseNodeStore {
         let file = File::open(&self.path)?;
         // SAFETY: fully written and no longer modified once the writer is dropped.
         self.mmap = Some(unsafe { Mmap::map(&file)? });
+        // The run index is the one part of this store that stays on the heap,
+        // and it is the term that decides whether a planet-scale run fits in
+        // RAM: 16 bytes per run, and runs are created by *gaps* in the id
+        // space, so a sparse geographic extract costs far more per node than a
+        // dense planet file. Report it rather than letting it surprise us
+        // hours in.
+        tracing::info!(
+            nodes = self.len,
+            runs = self.runs.len(),
+            avg_run_len = self.avg_run_len(),
+            index_heap_mb = self.index_heap_bytes() / (1024 * 1024),
+            values_mb = (self.len * Self::VALUE as u64) / (1024 * 1024),
+            "sparse node store finished"
+        );
         Ok(())
+    }
+
+    /// Mean nodes per run. Drives the heap cost of the run index: the fewer
+    /// gaps in the id space, the longer the runs and the cheaper the index.
+    #[must_use]
+    pub fn avg_run_len(&self) -> f64 {
+        if self.runs.is_empty() {
+            return 0.0;
+        }
+        self.len as f64 / self.runs.len() as f64
+    }
+
+    /// Heap bytes held by the run index (the store's only non-mmap term).
+    #[must_use]
+    pub fn index_heap_bytes(&self) -> u64 {
+        self.runs.len() as u64 * std::mem::size_of::<(i64, u64)>() as u64
     }
 
     /// Look up a node's `(lon, lat)`, or `None` if absent. Call [`finish`](Self::finish) first.
