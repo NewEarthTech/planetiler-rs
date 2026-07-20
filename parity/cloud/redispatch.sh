@@ -57,8 +57,13 @@ echo "== reset previous job + failsafe clock"
 # command lines including its own, and a pattern like `\./remote.*\.sh` matches
 # the very command string carrying it (the `.*` bridges the backslash that
 # keeps the literal patterns from self-matching). It kills its own shell.
+# Clear the prior run's home-dir logs too (mem trajectory, captured stdout),
+# not just status/job.log — a stale mem log with an old WATCHDOG line makes a
+# watcher fire on the wrong run. Safe here because the pkill above stops the
+# old run first, so nothing holds these open (clearing them mid-run would
+# orphan a live writer's inode instead).
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-  'pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; rm -rf status job.log repo; sudo shutdown -c 2>/dev/null; true'
+  'pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; sleep 2; rm -rf status job.log repo planet-mem.log planet-rs.stderr planet-D.log; sudo shutdown -c 2>/dev/null; true'
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" "sudo shutdown -h +$((MAX_HOURS * 60)) >/dev/null 2>&1"
 
 echo "== ship repo bundle + runner"
