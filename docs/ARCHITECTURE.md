@@ -1,6 +1,6 @@
 # planetiler-rs architecture
 
-A Rust port of [Planetiler](https://github.com/onthegomap/planetiler): it turns OpenStreetMap (and other geodata) into planet-scale Mapbox Vector Tile archives (MBTiles/PMTiles) through a parallel read → external-sort-on-disk → render pipeline. This document is the durable in-repo reference for how the crate is shaped and how it is proven correct and worthwhile. The phased build plan and raw upstream research live outside the repo (in local Claude context); this file is what a contributor reads.
+A Rust port of [Planetiler](https://github.com/onthegomap/planetiler): it turns OpenStreetMap (and other geodata) into planet-scale Mapbox Vector Tile archives (MBTiles/PMTiles) through a parallel read → external-sort-on-disk → render pipeline. This document is the durable in-repo reference for how the crate is shaped and how it is proven correct and worthwhile. The phased build plan and raw upstream research are kept in local notes outside the repo; this file is what a contributor reads.
 
 ## Why this exists
 
