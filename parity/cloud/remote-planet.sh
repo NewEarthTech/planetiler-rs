@@ -107,26 +107,71 @@ say ""
 
 tiles_in() { sqlite3 "$1" 'select count(*) from tiles' 2>/dev/null || echo "?"; }
 
-# Timed runs capture the pipeline's own stage timers alongside wall/RSS. The
-# node-store and merge lines are the pre-flight unknowns (run-index heap and
-# chunk count) finally being measured on a real planet.
+# The first planet attempt wedged the whole box: RSS climbed until the kernel
+# was in permanent page-reclaim and sshd starved, so nothing could be read out
+# and the diagnostic log — piped through grep, block-buffered — was lost with
+# the reboot. Two fixes, both here:
+#
+#   1. The run's stderr goes straight to a file on the EBS root ($HOME), which
+#      survives a wedge and a reboot, and is not behind a pipe buffer. It is
+#      grepped for the report only after the run ends.
+#   2. A sampler records VmRSS + major-fault count every 10 s to the same
+#      durable spot, and a watchdog SIGKILLs the run if RSS crosses a ceiling —
+#      so a memory blowup is captured and killed cleanly on one process instead
+#      of taking the box down. Peak RSS and wall come from the sampler, so
+#      /usr/bin/time (which only sees the wrapper, not the child) is dropped.
+RSS_CEILING_KB=$(( 220 * 1024 * 1024 ))   # of the box's ~247 GB usable
+RS_STDERR="$HOME/planet-rs.stderr"
+MEM_LOG="$HOME/planet-mem.log"
+
+sample_and_guard() {  # $1 = pid to watch
+  local pid=$1 rss majflt avail load
+  echo "ts vmrss_kb majflt memavail_kb load1" > "$MEM_LOG"
+  while kill -0 "$pid" 2>/dev/null; do
+    rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null)
+    majflt=$(awk '{print $12}' "/proc/$pid/stat" 2>/dev/null)
+    avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+    load=$(awk '{print $1}' /proc/loadavg)
+    echo "$(date +%s) ${rss:-0} ${majflt:-0} ${avail:-0} ${load:-0}" >> "$MEM_LOG"
+    if [ "${rss:-0}" -gt "$RSS_CEILING_KB" ] 2>/dev/null; then
+      echo "WATCHDOG $(date -u +%H:%M:%SZ): VmRSS ${rss}KB over ceiling; killing pid $pid" \
+        | tee -a "$MEM_LOG" "$REPORT"
+      kill -KILL "$pid" 2>/dev/null
+      return
+    fi
+    sleep 10
+  done
+}
+
 say "## planetiler-rs ($REF)"
-RS_OK=1
-/usr/bin/time -v "$BIN" generate \
+RS_START=$(date +%s)
+"$BIN" generate \
   --source "$INPUT" --output /data/out/rs.mbtiles \
   --layer osm --minzoom 12 --maxzoom 12 \
   --storage sparse --sort-memory-mb 1024 \
-  --min-size 0 --simplify 0 --buffer 0 --force 2>&1 \
-  | grep -E "sparse node store|k-way merge|chunk count|pass 1|pass 2|stream \+ render|merge \+ encode|Elapsed \(wall|Maximum resident" \
-  | sed -E 's/^[[:space:]]+//' | tee -a "$REPORT" || RS_OK=0
+  --min-size 0 --simplify 0 --buffer 0 --force > /dev/null 2> "$RS_STDERR" &
+RS_PID=$!
+sample_and_guard "$RS_PID" &
+MON_PID=$!
+wait "$RS_PID"; RS_RC=$?
+kill "$MON_PID" 2>/dev/null || true
+RS_END=$(date +%s)
 
-if [ "$RS_OK" = 1 ] && [ -f /data/out/rs.mbtiles ]; then
+PEAK_KB=$(awk 'NR>1 && $2>m{m=$2} END{print m+0}' "$MEM_LOG")
+# The pipeline's own stage timers and the two pre-flight unknowns (run-index
+# heap, merge chunk count), pulled from the durable stderr after the fact.
+grep -E "sparse node store|k-way merge|chunk|pass 1|pass 2|stream \+ render|merge \+ encode" \
+  "$RS_STDERR" | sed -E 's/^[[:space:]]+//' | tee -a "$REPORT" || true
+say "rs wall_s: $((RS_END - RS_START))  peak_rss_kb: ${PEAK_KB}  peak_rss_gb: $(( PEAK_KB / 1024 / 1024 ))  rc: $RS_RC"
+say "rs mem trajectory: $MEM_LOG ($(wc -l < "$MEM_LOG") samples)"
+
+if [ "$RS_RC" = 0 ] && [ -f /data/out/rs.mbtiles ]; then
   say "rs tiles: $(tiles_in /data/out/rs.mbtiles)"
   say "rs bytes: $(stat -c %s /data/out/rs.mbtiles)"
 else
-  say "rs: FAILED — skipping the upstream run rather than buying JVM hours on a dead comparison"
-  say ""
-  say "scratch after failure: $(du -sh /data/tmp 2>/dev/null | cut -f1)"
+  say "rs: FAILED (rc=$RS_RC) — skipping the upstream run rather than buying JVM hours on a dead comparison"
+  say "last stderr lines:"; tail -5 "$RS_STDERR" | tee -a "$REPORT" || true
+  say "scratch at failure: $(du -sh /data/tmp 2>/dev/null | cut -f1)"
   echo DONE > status   # a recorded failure is still a completed job
   exit 0
 fi
