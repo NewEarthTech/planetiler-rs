@@ -1,0 +1,83 @@
+# Planet pre-flight: what a whole-planet run needs, measured
+
+We have never run the planet. The largest input to date is europe (34.6 GB pbf, 625 M sorted entries, 739,799 tiles at z12). Planet is **93.9 GB** (`planet-260713`), **2.71× europe by bytes** and about **2.5× by node count**.
+
+This file exists because a planet run is a multi-hour, paid-for event where the interesting failures land *late* — after the read/render stage has already burned hours. Everything below was measured before spending anything, per the rule the partitioned-merge experiment bought: probe first, build second.
+
+## The two terms that scale badly
+
+A code audit named five candidate failures at planet scale. Three are dismissible by configuration and are covered in the checklist at the bottom. Two needed numbers.
+
+### 1. The sparse store's run index (the one genuinely unbounded term)
+
+The sparse node store advertises ~8 bytes/node, but **that is the memory-mapped value file, not RSS.** Alongside it sits `runs: Vec<(i64, u64)>` on the heap — 16 bytes per *run*, where a new run starts at every gap in the id space. So the heap cost is set not by node count but by how holes are distributed through the ids, which no amount of reading the code will tell you.
+
+The pessimistic reading is ugly. If deleted ids were scattered uniformly (planet holds ~9.5 B live ids out of ~13 B allocated, so ~27% gaps), mean run length would be ~3.7 and the index would want **41 GB of heap**, with a `Vec` doubling transient far above that. The only measured datapoint in the code's own docs was rhode-island at mean run 4.9, which sits right in that bad regime.
+
+Measured, with the store now reporting its own shape:
+
+| extract | nodes | runs | mean run length | index heap | value file |
+|---|---:|---:|---:|---:|---:|
+| great-britain (2.14 GB) | 230,257,811 | 31,601,155 | **7.29** | 482 MB | 1.76 GB |
+| europe (34.6 GB) | 3,779,381,747 | 381,061,449 | **9.92** | 5.81 GB | 28.8 GB |
+
+**Mean run length rises with extract size, and that resolves the question in our favour.** It is the expected direction and the reason matters: a geographic extract is a *scattered subset* of a global id space, so it is the pessimal case, and the bigger the extract the denser its coverage gets. rhode-island 4.9 → great-britain 7.29 → europe 9.92. The planet is the fully dense case and is the one file that cannot be a subset of anything, so its mean run length should be **at least** europe's 9.92 and plausibly well above it.
+
+Projecting at 9.5 B nodes, holding europe's ratio as a conservative floor:
+
+| mean run length | runs | index heap | value file (mmap) |
+|---|---:|---:|---:|
+| 9.92 (europe's, as a floor) | 958 M | **14.3 GB** | 71 GB |
+| 12 | 792 M | 11.8 GB | 71 GB |
+| 15 | 633 M | 9.4 GB | 71 GB |
+
+**So the run index costs roughly 10-15 GB at planet, not 41.** The uniform-deletion worst case is falsified by the trend in the measurements. This is comfortable on any box we would rent, and it is now logged at `finish` so a run says which regime it is in within the first pass instead of dying silently in the third hour.
+
+### 2. The merge's chunk count against the file-descriptor limit
+
+The k-way merge opens **every** spilled chunk at once and holds them for the whole merge. Chunk count is therefore a hard floor on file descriptors, and the open happens *after* the entire read/render/sort-feed stage — the most expensive possible place to fail.
+
+Measured on great-britain: **33 chunks for 44,195,923 entries** at the default 256 MB sort buffer, i.e. ~1.34 M entries per chunk.
+
+| input | entries | chunks @ 256 MB | chunks @ 1024 MB |
+|---|---:|---:|---:|
+| great-britain | 44 M | 33 (measured) | — |
+| europe | 625 M | ~467 | — |
+| **planet** | ~1.6 B | **~1,195** | **~299** |
+
+**Planet at the default buffer lands above a stock `ulimit -n` of 1024.** Not marginally — and europe at ~467 was already closer to the wall than anyone knew. Two independent fixes, and the run should carry both: raise `--sort-memory-mb` to 1024, which cuts chunks ~4× and speeds the merge anyway, and raise `ulimit -n` so the descriptor ceiling is nowhere near the working range. The merge now logs its chunk count up front and warns past 900.
+
+## Sizing
+
+Derived from the measurements above plus the on-disk entry format (8-byte key + 4-byte length + value; great-britain averages ~164 bytes/entry on disk).
+
+| | europe (measured) | planet (projected) |
+|---|---:|---:|
+| input pbf | 34.6 GB | **93.9 GB** |
+| nodes | 3.78 B | ~9.5 B |
+| sort entries | 625 M | ~1.6 B |
+| node store value file | 28.8 GB | ~71 GB |
+| node store index (heap) | 5.81 GB | ~14 GB |
+| sort spill | ~70 GB | **~265 GB** |
+| output archive (z12) | 24 GB | ~60 GB |
+| peak scratch | ~100 GB | **~350 GB** |
+| peak RSS | 47-53 GB | **~130-140 GB** |
+
+Most of that RSS is clean, evictable mmap pages of the value file, so the kernel can drop it under pressure rather than OOM — the architectural point the sparse store exists to make. The number to actually watch is the ~14 GB index plus the between-pass relation state, which is anonymous heap and cannot be evicted.
+
+Two lifetime notes that keep the peak lower than a naive sum: the node store and way-geometry store are dropped when the OSM stream returns, *before* the merge/write stage runs, so the 350 GB peak is not the sum of every line. And europe's measured scratch at the end of pass 1 was 50 GB, consistent with the 28.8 GB value file plus partial spill.
+
+## Pre-flight checklist
+
+1. **`--storage sparse` is mandatory.** The default is `ram`, whose store is `Vec<(i64, u64)>` at 16 bytes/node: **152 GB** at planet, and because it grows by doubling, ~228 GB live during the final reallocation. Nothing in the code enforces or warns about this.
+2. **Do not use a `.pmtiles` output path.** The PMTiles writer buffers the entire archive into one `Vec` at `finish`; the archive format is chosen purely by file extension, so this is one typo from a 60+ GB allocation.
+3. **`--sort-memory-mb 1024` and `ulimit -n 65536`.** See the chunk-count section; either alone is probably enough, both is cheap.
+4. **`TMPDIR` on the instance-store NVMe, ≥600 GB free.** All four scratch consumers use `tempfile` and honour it; unset, ~350 GB tries to land on the root volume.
+5. **z12, matching europe and great-britain.** Not just for comparability: at z14 the MBTiles dedup map (`HashMap<u128, i64>`, never bounded) reaches ~17.7 GB steady and ~26.5 GB during resize. At z12 it is negligible. A z0-14 planet build is a different and much more expensive question.
+6. **NVMe, not gp3.** The europe cloud run was disk-bound on gp3: 2601 s in stream/render/sort-feed against ~1410 s for the same stage on laptop NVMe.
+
+## Known gaps, stated plainly
+
+- **Planet's mean run length is projected, not measured.** The argument for ≥9.92 is structural (a dense global file cannot be sparser in its own id space than a subset of it) and the trend across three extracts supports it, but the planet is the only file that settles it. The instrumentation reports it in pass 1, so a run that disagrees is visible early and cheap to abort.
+- **Entry count is projected** from a nodes-to-entries ratio that held across great-britain and europe. Planet has proportionally more low-density area, which if anything pushes entries down.
+- **No crash recovery.** The MBTiles writer runs `journal_mode = OFF` inside a single archive-wide transaction, so any late failure loses the whole run rather than part of it.
