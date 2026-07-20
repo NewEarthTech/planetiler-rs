@@ -3,8 +3,9 @@
 //! temp database.
 
 use std::collections::BTreeMap;
+use std::hint::black_box;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use planetiler_rs::archive::{MbtilesWriter, TileArchive, TileCompression};
 use planetiler_rs::geom::TileCoord;
 use planetiler_rs::model::Value;

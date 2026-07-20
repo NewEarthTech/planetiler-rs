@@ -2,8 +2,9 @@
 //! zigzag/command geometry stream) plus whole-tile encode/decode.
 
 use std::collections::BTreeMap;
+use std::hint::black_box;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use planetiler_rs::model::Value;
 use planetiler_rs::mvt::{Feature, Geometry, Layer, Tile, decode_tile, encode_tile, geometry};
 

@@ -4,7 +4,9 @@
 //! all 13 upstream `planetiler-benchmarks` timing classes, each landing with
 //! the component it measures.
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 use planetiler_rs::geom::TileCoord;
 use planetiler_rs::model::SortKey;
 
