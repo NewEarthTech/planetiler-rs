@@ -103,12 +103,6 @@ export default function App() {
       );
       return run ? costUsd(run) : null;
     })(),
-    java: (() => {
-      const run = cloudRuns.find(
-        (r) => r.extract === extract.id && r.tool === "planetiler-java",
-      );
-      return run ? costUsd(run) : null;
-    })(),
   }));
 
   const gbCloud = findRun("great-britain", "planetiler-rs", "r7gd.4xlarge");
@@ -137,8 +131,10 @@ export default function App() {
             >
               Planetiler
             </a>
-            : same OSM extract in, same tiles out, measured on time, memory, and what
-            the build costs on a dedicated cloud box.
+            : same OSM extract in, matching tile output, measured on time,
+            memory, and what the build costs on a dedicated cloud box. We win at
+            city and state scale; Planetiler wins at country and continent. Both
+            are on the charts.
           </p>
         </div>
         <ThemeToggle />
@@ -152,8 +148,8 @@ export default function App() {
         />
         <StatTile
           value={`${(europeJava.peakRssMB / europeRs.peakRssMB).toFixed(1)}× less memory`}
-          label="at continent scale"
-          detail={`europe: ${fmtMemory(europeRs.peakRssMB)} vs ${fmtMemory(europeJava.peakRssMB)} peak RSS`}
+          label={`at continent scale, ${(europeRs.wallS / europeJava.wallS).toFixed(1)}× slower`}
+          detail={`europe: ${fmtMemory(europeRs.peakRssMB)} vs ${fmtMemory(europeJava.peakRssMB)} RSS, ${fmtDuration(europeRs.wallS)} vs ${fmtDuration(europeJava.wallS)}`}
         />
         <StatTile
           value={gbCloud ? fmtUsd(costUsd(gbCloud)!) : "—"}
@@ -165,7 +161,7 @@ export default function App() {
       <main className="grid gap-4 lg:grid-cols-2">
         <BenchChart
           title="Wall time"
-          description="Full build, by extract (log scale). Lower is better."
+          description="Full build, by extract (log scale). Lower is better. The EC2 series is a different machine and a later extract, so read it beside the laptop pair rather than against it."
           data={timeData}
           xKey="x"
           series={[
@@ -187,7 +183,7 @@ export default function App() {
         />
         <BenchChart
           title="Peak memory"
-          description="Peak RSS, by extract (log scale). Lower is better."
+          description="Peak RSS, by extract (log scale). Lower is better. The EC2 series is a different machine and a later extract, so read it beside the laptop pair rather than against it."
           data={memoryData}
           xKey="x"
           series={[
@@ -209,7 +205,7 @@ export default function App() {
         />
         <BenchChart
           title="Optimization trajectory"
-          description="planetiler-rs wall time across optimization rounds, laptop, byte-identical output each step."
+          description="planetiler-rs wall time across optimization rounds on the laptop, byte-identical output at every step. Rounds were measured in separate sessions on a shared machine, so the trend is the signal, not the individual deltas."
           data={trajectoryData}
           xKey="x"
           series={[
@@ -229,21 +225,19 @@ export default function App() {
         />
         <BenchChart
           title="Cost per build"
-          description="On-demand EC2 rate × wall clock, dedicated benchmark boxes (us-east-1)."
+          description="On-demand EC2 rate × wall clock, dedicated benchmark boxes (us-east-1). planetiler-rs only so far: Planetiler has not been run on this hardware, so there is no cost comparison to draw yet."
           data={costData}
           xKey="x"
           series={[
             { key: "rs", name: "planetiler-rs", color: SERIES_COLOR["planetiler-rs"] },
-            { key: "java", name: "Planetiler (Java)", color: SERIES_COLOR["planetiler-java"] },
           ]}
           format={fmtUsd}
           yScale="linear"
           table={{
-            columns: ["extract", "planetiler-rs", "Planetiler (Java)"],
+            columns: ["extract", "planetiler-rs"],
             rows: costData.map((row) => [
               row.x as string,
               row.rs != null ? fmtUsd(row.rs as number) : null,
-              row.java != null ? fmtUsd(row.java as number) : null,
             ]),
           }}
         />
@@ -251,19 +245,22 @@ export default function App() {
 
       <footer className="mt-10 border-t border-grid pt-5 text-xs leading-relaxed text-ink-muted">
         <p>
-          Method: identical task both sides — OSM extract → osm-qa-style MBTiles
-          (single layer), upstream Planetiler pinned at v0.10.2, interleaved
-          best-of-N rounds on otherwise-idle machines. Cloud numbers come from
-          dedicated instances launched per run; laptop numbers from the recorded
-          history in{" "}
+          Method: identical task both sides, OSM extract to osm-qa-style MBTiles
+          (single layer), upstream Planetiler pinned at v0.10.2. Cloud numbers
+          are interleaved best-of-N rounds on dedicated instances launched per
+          run. Laptop numbers come from the recorded history in{" "}
           <a
             href="https://github.com/johncarmack1984/planetiler-rs/tree/main/bench/results"
             className="underline underline-offset-2"
           >
             bench/results
           </a>
-          . Tile output is verified byte-identical (or semantically equal vs Java)
-          before any number is recorded. Updated {LAST_UPDATED}.
+          , measured on a shared development machine where concurrent builds add
+          roughly ±5%. Our own output is verified byte-identical across every
+          optimization step. Against Planetiler the bar is semantic: tile counts
+          agree within 1% (monaco exact) and shared attributes are byte-identical,
+          while 51 of monaco&rsquo;s 102 tiles are semantically identical and the
+          rest differ by sub-pixel simplification. Updated {LAST_UPDATED}.
         </p>
       </footer>
     </div>

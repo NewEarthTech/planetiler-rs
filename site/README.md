@@ -4,7 +4,7 @@ The benchmark scoreboard for [planetiler-rs](https://github.com/johncarmack1984/
 
 ## Where the numbers come from
 
-Every point is a recorded run of the same task on both tools — OSM extract in, osm-qa-style MBTiles out, upstream pinned at v0.10.2, output verified byte-identical (or semantically equal cross-tool) before the number counts. Laptop history is transcribed from [`bench/results/`](../bench/results); cloud numbers come from [`parity/cloud/`](../parity/cloud) runs on dedicated EC2 instances (interleaved best-of-N rounds, one box per dataset). Data lives in `src/data/benchmarks.ts` — append new runs there.
+Every point is a recorded run of the same task on both tools: OSM extract in, osm-qa-style MBTiles out, upstream pinned at v0.10.2. Our own output is verified byte-identical across every optimization step before a number counts; against Planetiler the bar is semantic (tile counts within 1%, monaco exact, shared attributes byte-identical, and 51 of monaco's 102 tiles semantically identical). Laptop history is transcribed from [`bench/results/`](../bench/results) and was measured on a shared development machine, so concurrent builds add roughly ±5%. Cloud numbers come from the EC2 runner (interleaved best-of-N rounds, one box per dataset, dedicated instances launched per run). Data lives in `src/data/benchmarks.ts`; append new runs there and bump `LAST_UPDATED`.
 
 ## Stack
 

@@ -1,12 +1,16 @@
 /**
- * Benchmark dataset, transcribed from planetiler-rs `bench/results/`
- * (laptop history) and `parity/cloud/results/` (dedicated EC2 runs).
+ * Benchmark dataset, transcribed from planetiler-rs `bench/results/` (laptop
+ * history, committed) and the EC2 runner's fetched logs (`parity/cloud/results/`,
+ * gitignored run artifacts — curated numbers land in `bench/results/`).
  * Task everywhere: OSM extract → osm-qa-style MBTiles (single `osm` layer),
  * z12 (country/continent) or z12–14 (city/state). Upstream pinned at v0.10.2.
  *
  * Cost = instance on-demand rate × wall clock (us-east-1). Laptop runs carry
  * no cost — the machine was already paid for and heavily contended, which is
  * exactly why the cloud runs exist.
+ *
+ * Every number here must trace to a recorded run. If you cannot point at the
+ * line in `bench/results/` it came from, it does not belong on the page.
  */
 
 export type Tool = "planetiler-rs" | "planetiler-java";
@@ -63,6 +67,9 @@ export const RUNS: Run[] = [
   { extract: "europe", tool: "planetiler-java", machine: "laptop-12c", wallS: 1062, peakRssMB: 76698, date: "2026-07-01", note: "stock defaults" },
 
   // — dedicated EC2 runs (parity/cloud/results/) —
+  // Geofabrik re-fetched on the run date, so this is a later extract vintage
+  // than the laptop row above (21324 tiles vs 21472) as well as different
+  // hardware. Same flags, but not a like-for-like pair with the laptop number.
   { extract: "great-britain", tool: "planetiler-rs", machine: "r7gd.4xlarge", wallS: 245.0, peakRssMB: 4194, date: "2026-07-03", note: "best of 3 interleaved rounds, geofabrik-latest input" },
 ];
 
@@ -82,6 +89,9 @@ export const TRAJECTORY: TrajectoryPoint[] = [
   { extract: "great-britain", round: 1, label: "baseline", wallS: 332, date: "2026-07-01" },
   { extract: "great-britain", round: 2, label: "relation fixes", wallS: 250, date: "2026-07-01" },
   { extract: "great-britain", round: 3, label: "parallel decode", wallS: 153, date: "2026-07-01" },
+  // Round 4 comes from the parallel-write A/B, a different session from rounds
+  // 1-3: main measured 173.8 s there, so the branch's own gain was -13%, not
+  // the -1% the round-3 comparison suggests. Machine noise, not a plateau.
   { extract: "great-britain", round: 4, label: "parallel write", wallS: 150.9, date: "2026-07-02" },
   { extract: "europe", round: 1, label: "first run", wallS: 3198, date: "2026-07-01" },
   { extract: "europe", round: 2, label: "parallel write + relation memory", wallS: 2496, date: "2026-07-02" },
