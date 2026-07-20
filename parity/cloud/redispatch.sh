@@ -9,10 +9,21 @@ set -euo pipefail
 IP=${1:?instance ip}
 JOB=${2:?job name}
 REF_A=${3:?baseline ref}
-REF_B=${4:?candidate ref}
-ROUNDS=${5:-3}
-MAX_HOURS=${6:-4}
-REGION=${AWS_REGION:-us-east-1}
+case "$JOB" in
+  planet)
+    REF_B=${4:-$REF_A}
+    ROUNDS=${5:-1}
+    MAX_HOURS=${6:-14}
+    REGION=${AWS_REGION:-us-west-2}
+    ;;
+  *)
+    REF_B=${4:?candidate ref}
+    ROUNDS=${5:-3}
+    MAX_HOURS=${6:-4}
+    REGION=${AWS_REGION:-us-east-1}
+    ;;
+esac
+PLANET_URL=${PLANET_URL:-https://osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com/planet/pbf/2026/planet-260713.osm.pbf}
 NAME=planetiler-bench
 KEY_FILE=$HOME/.ssh/$NAME.pem
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -40,16 +51,37 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== reset previous job + failsafe clock"
+# Deliberately does NOT touch /data: a re-dispatch after a script fix should
+# reuse the staged input, which for planet is a 94 GB download.
+# Two exact patterns, not one with a wildcard: `pkill -f` matches against full
+# command lines including its own, and a pattern like `\./remote.*\.sh` matches
+# the very command string carrying it (the `.*` bridges the backslash that
+# keeps the literal patterns from self-matching). It kills its own shell.
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-  'pkill -f "\./remote\.sh" 2>/dev/null; rm -rf status job.log repo; sudo shutdown -c 2>/dev/null; true'
+  'pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; rm -rf status job.log repo; sudo shutdown -c 2>/dev/null; true'
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" "sudo shutdown -h +$((MAX_HOURS * 60)) >/dev/null 2>&1"
 
 echo "== ship repo bundle + runner"
 BUNDLE=$(mktemp -t planetiler-bundle.XXXXXX)
-git -C "$REPO_ROOT" bundle create "$BUNDLE" "$REF_A" "$REF_B" 2>/dev/null
+if [ "$JOB" = planet ]; then
+  git -C "$REPO_ROOT" bundle create "$BUNDLE" "$REF_A" 2>/dev/null
+else
+  git -C "$REPO_ROOT" bundle create "$BUNDLE" "$REF_A" "$REF_B" 2>/dev/null
+fi
 scp -q "${SSH_OPTS[@]}" "$BUNDLE" "ubuntu@$IP:repo.bundle"
-scp -q "${SSH_OPTS[@]}" "$HERE/remote.sh" "ubuntu@$IP:remote.sh"
+RUNNER=remote.sh
+[ "$JOB" = planet ] && RUNNER=remote-planet.sh
+scp -q "${SSH_OPTS[@]}" "$HERE/$RUNNER" "ubuntu@$IP:$RUNNER"
 rm -f "$BUNDLE"
+
+if [ "$JOB" = planet ]; then
+  echo "== start job: planet $REF_A"
+  ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
+    "chmod +x $RUNNER && nohup ./$RUNNER '$REF_A' '$PLANET_URL' > job.log 2>&1 < /dev/null & echo dispatched"
+  echo "== detached; collect with: $HERE/watch.sh $IP $MAX_HOURS"
+  trap - EXIT
+  exit 0
+fi
 
 echo "== start job: $JOB $REF_A $REF_B ($ROUNDS rounds)"
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \

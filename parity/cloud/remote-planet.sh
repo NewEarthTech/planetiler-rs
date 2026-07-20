@@ -73,9 +73,15 @@ BASE="https://github.com/onthegomap/planetiler/releases/download/$PLANETILER_VER
 if [ ! -f "$JAR" ]; then
   curl -fsSL "$BASE/planetiler.jar" -o "$JAR"
   curl -fsSL "$BASE/planetiler.jar.sha256" -o "$JAR.sha256"
-  echo "$(cat "$JAR.sha256")  $JAR" | sha256sum -c - >/dev/null \
-    || { echo "jar sha256 mismatch" >&2; exit 1; }
 fi
+# The published checksum file is `<hash>  planetiler.jar`, so feeding it to
+# `sha256sum -c` fails on the filename, not the hash. Compare the hashes
+# directly, the same way parity/fetch-upstream.sh does. Verified on every run,
+# not just the download, so a half-written cached jar is caught too.
+expected=$(cut -d' ' -f1 < "$JAR.sha256")
+actual=$(sha256sum "$JAR" | cut -d' ' -f1)
+[ "$expected" = "$actual" ] || {
+  echo "jar sha256 mismatch: expected $expected got $actual" >&2; exit 1; }
 
 echo "== build $REF"
 git clone -q repo.bundle repo
