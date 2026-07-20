@@ -1,0 +1,20 @@
+set shell := ["bash", "-cu"]
+
+# Build the production site into dist/.
+build:
+    bun install
+    bun run build
+
+# Build + publish: the CDK BucketDeployment ships dist/ and invalidates
+# CloudFront as part of the deploy. Requires default AWS creds and infra/.env
+# (see infra/.env.example).
+deploy: build
+    cd infra && bun install && npx cdk deploy --require-approval never
+
+# Show what a deploy would change without applying it.
+diff: build
+    cd infra && bun install && npx cdk diff
+
+
+
+

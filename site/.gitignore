@@ -1,0 +1,5 @@
+node_modules/
+dist/
+infra/cdk.out/
+infra/.env
+infra/cdk-outputs.json
