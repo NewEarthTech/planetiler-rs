@@ -7,19 +7,44 @@
 # Usage: parity/cloud/run.sh <job> <ref-a> <ref-b> [rounds] [instance-type] [max-hours] [data-ebs-gb]
 #   e.g. parity/cloud/run.sh gb-ab main perf/parallel-merge
 #        parity/cloud/run.sh europe-ab main perf/parallel-merge 2 r7g.8xlarge 8 500
+#        parity/cloud/run.sh planet main
 # `d`-suffix instance types use their local NVMe for /data; for types without
 # instance store, pass data-ebs-gb to attach a gp3 data volume instead
 # (provisioned to 8000 IOPS / 500 MB/s so disk class doesn't dominate results).
+#
+# The `planet` job is the odd one out and behaves differently on purpose: it
+# takes a single ref (there is nothing to A/B against — nobody has run a planet
+# yet), it defaults to a bigger box in us-west-2 because the OSM planet mirror
+# lives there and an in-region fetch of 94 GB is free and fast, and it
+# **detaches after dispatch** instead of polling. A planet run is hours long,
+# and holding a laptop ssh session open across that has flaked repeatedly.
+# Watch and collect it with `watch.sh <ip>` instead.
 set -euo pipefail
 
-JOB=${1:?job name (gb-ab | europe-ab)}
+JOB=${1:?job name (gb-ab | europe-ab | planet)}
 REF_A=${2:?baseline ref}
-REF_B=${3:?candidate ref}
-ROUNDS=${4:-3}
-INSTANCE_TYPE=${5:-r7gd.4xlarge}
-MAX_HOURS=${6:-4}
-DATA_EBS_GB=${7:-0}
-REGION=${AWS_REGION:-us-east-1}
+case "$JOB" in
+  planet)
+    REF_B=${3:-$REF_A}
+    ROUNDS=${4:-1}
+    INSTANCE_TYPE=${5:-r7gd.8xlarge}
+    MAX_HOURS=${6:-14}
+    DATA_EBS_GB=${7:-0}
+    REGION=${AWS_REGION:-us-west-2}
+    ;;
+  *)
+    REF_B=${3:?candidate ref}
+    ROUNDS=${4:-3}
+    INSTANCE_TYPE=${5:-r7gd.4xlarge}
+    MAX_HOURS=${6:-4}
+    DATA_EBS_GB=${7:-0}
+    REGION=${AWS_REGION:-us-east-1}
+    ;;
+esac
+
+# Pinned rather than `planet-latest`: a benchmark input has to be reproducible,
+# same reason the upstream jar is pinned. Bump deliberately, and re-record.
+PLANET_URL=${PLANET_URL:-https://osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com/planet/pbf/2026/planet-260713.osm.pbf}
 NAME=planetiler-bench
 KEY_FILE=$HOME/.ssh/$NAME.pem
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -104,10 +129,40 @@ ssh "${SSH_OPTS[@]}" "ubuntu@$IP" true || { echo "ssh unreachable" >&2; exit 1; 
 
 echo "== ship repo bundle + runner"
 BUNDLE=$(mktemp -t planetiler-bundle.XXXXXX)
-git -C "$REPO_ROOT" bundle create "$BUNDLE" "$REF_A" "$REF_B" 2>/dev/null
+if [ "$JOB" = planet ]; then
+  git -C "$REPO_ROOT" bundle create "$BUNDLE" "$REF_A" 2>/dev/null
+else
+  git -C "$REPO_ROOT" bundle create "$BUNDLE" "$REF_A" "$REF_B" 2>/dev/null
+fi
 scp -q "${SSH_OPTS[@]}" "$BUNDLE" "ubuntu@$IP:repo.bundle"
-scp -q "${SSH_OPTS[@]}" "$HERE/remote.sh" "ubuntu@$IP:remote.sh"
+RUNNER=remote.sh
+[ "$JOB" = planet ] && RUNNER=remote-planet.sh
+scp -q "${SSH_OPTS[@]}" "$HERE/$RUNNER" "ubuntu@$IP:$RUNNER"
 rm -f "$BUNDLE"
+
+# nohup with stdin still attached leaves the dispatching ssh hanging; the
+# `< /dev/null` is load-bearing, not decoration.
+if [ "$JOB" = planet ]; then
+  echo "== start job: planet $REF_A"
+  ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
+    "chmod +x $RUNNER && nohup ./$RUNNER '$REF_A' '$PLANET_URL' > job.log 2>&1 < /dev/null & echo dispatched"
+  # Drop the cleanup trap outright rather than flipping FETCHED: the box has to
+  # outlive this script, and neither branch of cleanup is what we want here.
+  trap - EXIT
+  cat <<EOS
+
+== detached. The box is running the planet job; this script is done.
+
+  instance: $IID   ip: $IP   region: $REGION
+  failsafe: self-terminates ${MAX_HOURS}h after boot, shutdown = terminate
+
+  watch + collect:  $HERE/watch.sh $IP $MAX_HOURS
+  peek at the log:  ssh -i $KEY_FILE ubuntu@$IP 'tail -f job.log'
+  kill it now:      aws --region $REGION ec2 terminate-instances --instance-ids $IID
+
+EOS
+  exit 0
+fi
 
 echo "== start job: $JOB $REF_A $REF_B ($ROUNDS rounds)"
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
