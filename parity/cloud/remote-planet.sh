@@ -43,6 +43,11 @@ for _ in $(seq 1 90); do mountpoint -q /data && break; sleep 2; done
 mountpoint -q /data || { echo "no /data mount" >&2; exit 1; }
 mkdir -p /data/tmp /data/out
 export TMPDIR=/data/tmp
+# A watchdog-killed or rebooted run leaves its scratch behind (TempDir::drop
+# never fires), and at planet scale that is hundreds of GB of node store and
+# sort chunks. Clear stale scratch at startup so a re-dispatch onto the same
+# box doesn't stack corpses until the disk fills. Nothing is running yet.
+rm -rf /data/tmp/.tmp* /data/out/* 2>/dev/null || true
 
 # The tracing filter defaults to info on its own, but be explicit so an
 # inherited RUST_LOG=warn on the box can't silence the stage timers.
