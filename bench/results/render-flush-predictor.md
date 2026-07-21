@@ -52,6 +52,22 @@ No pipeline slowdown: the added work is one bounding-rect reduction plus O(zooms
 - Per-feature predicted-vs-actual is not captured — the summary rides the byte-max flush. Capturing the top-K features' individual fidelity needs the `flush_render_batch` restructure the fix PR does anyway; fold it in there.
 - `predict_pieces` ignores `options.bounds`, so it over-predicts for features extending beyond a bounded source's bbox. Intentional (the safe direction) for this measurement; a bounds-clip intersection is the candidate tightening for mechanism 3. It is moot for the planet (unbounded), whose real monsters are solid ocean/ice polygons that fill their bbox — where the predictor is already tight.
 
+## Mechanism 2: predicted-pieces chunking (byte-identical, local-verified)
+
+The first bounding mechanism, built on the predictor above. `flush_render_batch` now computes each feature's predicted pieces once, cuts the batch into contiguous sub-chunks whose summed prediction stays under a budget (`RENDER_CHUNK_PIECES = 32,768`, ~256 MB at the tag-heavy monster rate), and renders + feeds each sub-chunk in turn (`render_chunk`), freeing its `rendered` Vec before the next. The H-A wall was a cluster of monster multipolygons in **one** batch rendering concurrently into one multi-GB Vec (≥ 35-40 GB in flight at the kill); chunking renders them sequentially, one bounded sub-chunk at a time, so peak render memory drops from a whole batch of monsters to one sub-chunk — or, until slab-mode lands, one single over-budget feature.
+
+**Byte-identical by construction.** Sub-chunks are contiguous, in batch order, and each `par_iter().flat_map_iter().collect()` preserves order, so the concatenated `sort.add` sequence is unchanged from a single whole-batch collect — and `render_feature` is a pure function of one feature, so a feature renders the same in a sub-slice as in the whole batch. The partitioner `chunk_ranges` is unit-tested for exactly the property this rests on: the ranges tile `0..n` contiguously with no gaps or overlaps, and a single over-budget feature forms a singleton.
+
+| config | mech 2 vs increment-1 (== `main`) |
+|---|---|
+| monaco z12-14 | identical (common path, single chunk) |
+| rhode-island z12-14 (default + spill) | identical (common path) |
+| great-britain z12 sparse (planet flags) | **identical — and the chunking path actually engaged** |
+
+On great-britain the monster batch split as intended: flushes **10,584 → 10,611**, and the peak flush dropped from **40,154 pieces / 77 MB to 12,893 pieces / 42 MB** — the working set nearly halved with byte-identical output. Wall time was 158 s (mech 2) vs 160 s (baseline), i.e. no regression from the chunking. On the planet, where the batch holds several multi-GB monsters at once rather than GB's lone country-scale feature, the reduction is from the concurrent multi-monster aggregate down to the largest single sub-chunk — the mechanism that should let the run complete.
+
+**Owed before cloud:** the europe A/B (wall + peak RSS, `main` vs branch) to confirm the chunking adds no common-path overhead at continent scale. Deferred from this session because the box was under load ~10 for most of it; the local ladder above plus the GB timing are the interim evidence, and europe is the next session's first rung now that the box is quiet.
+
 ## Next
 
-Mechanisms 1-3 — input-side early flush, predicted-pieces chunking, slab-mode single-monster iteration — build on this validated predictor. The predicted-pieces pre-render warning already ships the death signature the last planet run lacked, so the next planet run that walls will name its monster (e.g. 656343, predicted > 1.14 M) on the line before it dies.
+Mechanism 2 caps the batch term; **mechanism 3 (slab-mode)** removes the remaining single-over-budget-feature ceiling by iterating one monster's tile rect in bounded slabs, feeding the sort per slab (preserving the z-ascending tx-outer/ty-inner order, so still byte-identical). Mechanism 1 (input-side early flush) is defense-in-depth on the input batch and may fold in or be skipped if 2+3 suffice. Then Phase 3: the validated planet run + Java head-to-head. The predicted-pieces pre-render warning already ships the death signature the last planet run lacked, so any residual wall names its monster (e.g. 656343, predicted > 1.14 M) on the line before it dies.
