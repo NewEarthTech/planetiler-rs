@@ -47,6 +47,11 @@ echo "== fetch results"
 mkdir -p "$OUT_DIR"
 scp -q -r "${SSH_OPTS[@]}" "ubuntu@$IP:results/*" "$OUT_DIR/" || true
 scp -q "${SSH_OPTS[@]}" "ubuntu@$IP:job.log" "$OUT_DIR/planet-$(date +%Y%m%d-%H%M%S).log" || true
+# The durable diagnostics the planet runner keeps on the EBS root: the RSS +
+# major-fault trajectory and the unbuffered run stderr. These are what tell us
+# where a memory blowup happened, so collect them regardless of DONE/FAIL.
+scp -q "${SSH_OPTS[@]}" "ubuntu@$IP:planet-mem.log" "$OUT_DIR/planet-mem-$(date +%Y%m%d-%H%M%S).log" 2>/dev/null || true
+scp -q "${SSH_OPTS[@]}" "ubuntu@$IP:planet-rs.stderr" "$OUT_DIR/planet-rs-$(date +%Y%m%d-%H%M%S).stderr" 2>/dev/null || true
 
 if [ "$STATUS" = DONE ]; then
   echo "terminating $IID"

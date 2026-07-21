@@ -1,8 +1,38 @@
 # Planet pre-flight: what a whole-planet run needs, measured
 
-We have never run the planet. The largest input to date is europe (34.6 GB pbf, 625 M sorted entries, 739,799 tiles at z12). Planet is **93.9 GB** (`planet-260713`), **2.71× europe by bytes** and about **2.5× by node count**.
+Planet is **93.9 GB** (`planet-260713`), **2.71× europe by bytes**. The largest prior input was europe (34.6 GB pbf, 625 M sorted entries, 739,799 tiles at z12).
 
-This file exists because a planet run is a multi-hour, paid-for event where the interesting failures land *late* — after the read/render stage has already burned hours. Everything below was measured before spending anything, per the rule the partitioned-merge experiment bought: probe first, build second.
+This file exists because a planet run is a multi-hour, paid-for event where the interesting failures land *late* — after the read/render stage has already burned hours. The projections below were made before spending anything, per the rule the partitioned-merge experiment bought: probe first, build second. **The run has since happened — measured results are in the "First planet run" section at the top; the projections that follow are kept for the record.**
+
+## First planet run (2026-07-20, r7gd.8xlarge · 32c/256 GB · us-west-2)
+
+**Result: planetiler-rs does not complete a whole planet on a 256 GB box.** It builds cleanly through pass 1 and pass 2, then explodes in the write stage. Two prior attempts OOM-wedged the box (no memory guard); a third with an RSS watchdog caught it cleanly at 235 GB and preserved the trajectory. No Planetiler head-to-head yet — our runner only starts the Java side if ours completes.
+
+**The node store — the term I feared most — beat its projection.**
+
+```
+sparse node store finished
+  nodes = 10,742,674,832    runs = 496,166,544    avg_run_len = 21.65
+  index (heap) = 7.4 GB     values (mmap) = 80 GB     pass 1 wall = 20.2 min
+```
+
+The projection argued europe's run-length (9.92) was a conservative floor because a geographic extract is a scattered subset of a global id space. Planet came in at **21.65** — denser still — so the heap index is **7.4 GB**, not the 41 GB the uniform-deletion worst case predicted. **The low-memory node-store architecture holds at 10.7 billion nodes.** RSS sat at ~100 GB, stable, through pass 1, pass 2, and sort-feed — well under the box.
+
+**The wall is the write stage, and it is anonymous heap, not the node store.** With `--sort-memory-mb 1024` the sort spilled **297 chunks** (comfortably under the raised fd limit — that pre-flight concern was real and is handled). Sort-feed ran to ~00:48; the last chunk landed at 00:48:32; `/data/out` never received a single tile. Then:
+
+```
+RSS (10 s samples, final minute):  117 → 117 → 120 → 152 → 180 → 208 → 235 GB   (watchdog kill)
+major faults across that climb:    685867 → 685867 → 685867 (flat)
+```
+
+~120 GB allocated in ~40 seconds with zero major-fault activity: pure anonymous heap, at the instant the sort finishes and the merge begins grouping entries into tiles. The write pipeline materializes whole decoded tiles to encode them, and at planet z12 — uncapped — that materialization runs away before the first tile is written. The scoreboard already documents the same shape at low zoom (an uncapped mega-tile: 59 GB → 5.9 GB with `--max-features-per-tile 50000`); planet reaches it at z12 from global density.
+
+**Named fixes, in order of effort:**
+- `--max-features-per-tile` — bounds features per tile-layer *before decode* (proven 10× at low zoom). Cheapest test of whether a capped planet completes on 256 GB; changes output, so not a like-for-like europe/GB comparison.
+- Stream the write stage so whole tiles are never fully materialized — the principled fix, same move as the parallel-write and relation-capture rounds that took europe 67 → 53 GB. Makes an *uncapped* planet fit, which is the real target.
+- A bigger box (r7gd.16xlarge, 512 GB) only buys headroom; if a single tile's materialization is unbounded it postpones the wall rather than removing it.
+
+Cost of the finding: ~$15 across four dispatches (two wedges before the watchdog existed, a healthy run whose log went to /dev/null, and this one). Lessons folded back into the runner: RSS watchdog, unbuffered stdout capture, self-cleaning scratch.
 
 ## The two terms that scale badly
 
