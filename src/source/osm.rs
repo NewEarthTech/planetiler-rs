@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 
+use geo::CoordsIter;
 use geo_types::{
     Coord, Geometry, LineString, MultiLineString, MultiPolygon, Point, Polygon, coord,
 };
@@ -269,9 +270,33 @@ pub fn stream_osm(
         "osm pass 2 (ways) done"
     );
 
-    // Assemble relations from their (now known) member geometries.
+    // Assemble relations from their (now known) member geometries. A
+    // planet-scale relation (ocean coastline, ice-shelf multipolygon) can carry
+    // millions of coords and, once rendered, clip into the unbounded batch that
+    // walls the write stage — so name the big ones by id as they pass here,
+    // upstream of any batching (H-A probe). `coords` is the driver: it sets the
+    // number of tile pieces the render expands into. `members` is only a
+    // structural-outlier flag — routine bus/route networks carry thousands of
+    // members with trivial geometry, so its bar is high to keep the log honest.
+    const RELATION_COORDS_WARN: usize = 1_000_000;
+    const RELATION_MEMBERS_WARN: usize = 50_000;
     for relation in relations {
         if let Some(feature) = assemble_relation(&relation, &member_ways) {
+            let members = relation.members.len();
+            let coords = feature.geometry.coords_count();
+            if members > RELATION_MEMBERS_WARN || coords > RELATION_COORDS_WARN {
+                let kind = match relation.kind {
+                    RelationKind::MultiPolygon => "multipolygon",
+                    RelationKind::Route => "route",
+                };
+                tracing::info!(
+                    relation_id = relation.id,
+                    kind,
+                    members,
+                    coords,
+                    "large relation assembled"
+                );
+            }
             sink(feature)?;
         }
     }
