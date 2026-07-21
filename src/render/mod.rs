@@ -17,6 +17,7 @@ mod simplify;
 
 use std::collections::BTreeMap;
 
+use geo::BoundingRect;
 use geo_types::{Coord, Geometry, LineString, Polygon};
 use rayon::prelude::*;
 
@@ -93,6 +94,49 @@ pub fn render_feature(feature: &VectorFeature, options: &RenderOptions) -> Vec<R
         render_at_zoom(feature, &world, z, options, &mut out);
     }
     out
+}
+
+/// Predict, as a cheap over-estimate, how many per-tile pieces
+/// [`render_feature`] will emit for this feature — the summed covered-tile-rect
+/// area across its zoom range, taken from the raw lng/lat bounding box *before*
+/// any simplification, min-size drop, or bounds clip.
+///
+/// This is the same quantity [`render_at_zoom`] computes as `tile_count`, but
+/// derivable per feature *ahead* of the render, which is what lets the pipeline
+/// name and bound a monster before it expands. It never under-counts: simplify,
+/// min-size, and the bounds clip can each only shrink the covered rect, and
+/// clipping can only turn a covered tile empty — so `predict_pieces >=
+/// render_feature(..).len()` always holds, making it a safe budget for the
+/// render working set. Cost is one bounding-box reduction plus O(zooms)
+/// arithmetic, independent of the (possibly enormous) tile count.
+pub fn predict_pieces(feature: &VectorFeature, options: &RenderOptions) -> u64 {
+    let Some(rect) = feature.geometry.bounding_rect() else {
+        return 0;
+    };
+    // Web-mercator maps lng linearly and lat monotonically to world space, so
+    // the world bbox is exactly the transform of the lng/lat corners (NW, SE).
+    let (ax, ay) = lng_lat_to_world(rect.min().x, rect.max().y);
+    let (bx, by) = lng_lat_to_world(rect.max().x, rect.min().y);
+    let (min_wx, max_wx) = (ax.min(bx), ax.max(bx));
+    let (min_wy, max_wy) = (ay.min(by), ay.max(by));
+
+    let min_z = feature.min_zoom.max(options.min_zoom);
+    let max_z = feature.max_zoom.min(options.max_zoom);
+    let extent = f64::from(options.extent);
+    // `render_at_zoom` derives tile indices as (scaled_coord ± buffer) / extent
+    // where scaled_coord = world * n * extent, i.e. world * n ± buffer/extent.
+    let buffer_tiles = options.buffer / extent;
+    let mut total: u64 = 0;
+    for z in min_z..=max_z {
+        let n = f64::from(TileCoord::axis_tiles(z));
+        let max_tile = TileCoord::axis_tiles(z) - 1;
+        let tx0 = clamp_tile(min_wx * n - buffer_tiles, max_tile);
+        let tx1 = clamp_tile(max_wx * n + buffer_tiles, max_tile);
+        let ty0 = clamp_tile(min_wy * n - buffer_tiles, max_tile);
+        let ty1 = clamp_tile(max_wy * n + buffer_tiles, max_tile);
+        total += u64::from(tx1 - tx0 + 1) * u64::from(ty1 - ty0 + 1);
+    }
+    total
 }
 
 fn render_at_zoom(
@@ -629,5 +673,106 @@ mod tests {
             count(&simplified) < count(&plain),
             "simplify reduces vertex count"
         );
+    }
+
+    #[test]
+    fn predicted_pieces_never_under_counts_emitted() {
+        // The predictor is a budget for the render working set, so it must never
+        // under-count what render_feature actually emits — across geometry
+        // kinds, zoom ranges, and the size filters it deliberately ignores.
+        let square: Vec<_> = [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)]
+            .iter()
+            .map(|&(wx, wy)| {
+                let (lng, lat) = ll(wx, wy);
+                coord! {x: lng, y: lat}
+            })
+            .collect();
+        let (pa, pb) = (ll(0.3, 0.3), ll(0.3, 0.25));
+        let lb = ll(0.7, 0.25);
+        let (ta, tb) = (ll(0.5, 0.5), ll(0.5002, 0.5));
+
+        let cases: Vec<(VectorFeature, RenderOptions)> = vec![
+            // Point, single zoom.
+            (
+                feature(Geometry::Point(Point::new(pa.0, pa.1)), 3, 3),
+                opts(0, 14),
+            ),
+            // Polygon covering four z1 tiles.
+            (
+                feature(
+                    Geometry::Polygon(Polygon::new(LineString(square.clone()), vec![])),
+                    1,
+                    1,
+                ),
+                opts(0, 14),
+            ),
+            // Line sliced across a tile boundary.
+            (
+                feature(
+                    Geometry::LineString(LineString(vec![
+                        coord! {x: pb.0, y: pb.1},
+                        coord! {x: lb.0, y: lb.1},
+                    ])),
+                    1,
+                    1,
+                ),
+                opts(0, 14),
+            ),
+            // Wide polygon over a multi-zoom range.
+            (
+                feature(
+                    Geometry::Polygon(Polygon::new(LineString(square), vec![])),
+                    2,
+                    6,
+                ),
+                opts(0, 14),
+            ),
+            // Sub-pixel line with min-size filtering ON — the predictor ignores
+            // the filter, so it must still not under-count the survivors.
+            (
+                feature(
+                    Geometry::LineString(LineString(vec![
+                        coord! {x: ta.0, y: ta.1},
+                        coord! {x: tb.0, y: tb.1},
+                    ])),
+                    0,
+                    14,
+                ),
+                RenderOptions {
+                    min_size_px: 1.0,
+                    ..opts(0, 14)
+                },
+            ),
+        ];
+
+        for (i, (f, options)) in cases.iter().enumerate() {
+            let predicted = predict_pieces(f, options);
+            let actual = render_feature(f, options).len() as u64;
+            assert!(
+                predicted >= actual,
+                "case {i}: predicted {predicted} < actual {actual}"
+            );
+        }
+    }
+
+    #[test]
+    fn predicted_pieces_is_tight_for_solid_coverage() {
+        // A polygon that solidly fills its bbox predicts exactly what it emits
+        // (the four z1 tiles) — the tightness that keeps the common render path
+        // a single chunk once budgeting is layered on top.
+        let ring: Vec<_> = [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)]
+            .iter()
+            .map(|&(wx, wy)| {
+                let (lng, lat) = ll(wx, wy);
+                coord! {x: lng, y: lat}
+            })
+            .collect();
+        let f = feature(
+            Geometry::Polygon(Polygon::new(LineString(ring), vec![])),
+            1,
+            1,
+        );
+        assert_eq!(predict_pieces(&f, &opts(0, 14)), 4);
+        assert_eq!(render_feature(&f, &opts(0, 14)).len(), 4);
     }
 }

@@ -24,7 +24,7 @@ use crate::geom::TileCoord;
 use crate::model::{Entry, MAX_LAYER, SortKey, Value};
 use crate::mvt::{self, encode_tile};
 use crate::profile::{FeatureCollector, Profile, VectorFeature};
-use crate::render::{RenderOptions, render_feature};
+use crate::render::{RenderOptions, predict_pieces, render_feature};
 use crate::source::SourceFeature;
 
 /// Generation options (a subset of the eventual CLI surface).
@@ -206,12 +206,59 @@ pub fn generate(
 }
 
 // Render-flush probe thresholds (instrumentation only; see `RenderProbe`). A
-// batch whose summed *input* coords exceed this is warned before the render
-// alloc; a single flush whose *output* exceeds either bound is warned after.
-const PRE_RENDER_COORD_WARN: u64 = 10_000_000;
+// batch containing a feature whose *predicted* output pieces exceed this is
+// warned before the render alloc — naming the monster before it detonates; a
+// single flush whose realized *output* exceeds either bound is warned after.
+const PRE_RENDER_PIECES_WARN: u64 = 100_000;
 const FLUSH_PIECES_WARN: usize = 100_000;
 const FLUSH_BYTES_WARN: usize = 256 << 20;
 const PROBE_RENDER_SUMMARY_SECS: u64 = 30;
+
+/// A batch's input geometry characterized *before* the par-render, so a monster
+/// is named in the log ahead of the allocation storm it triggers. `predicted`
+/// pieces (summed covered-tile area, [`predict_pieces`]) is the size driver —
+/// the falsified probe showed multi-GB flushes from modest-*coord* ocean/ice
+/// polygons whose input-coord warning never fired — while input coords are kept
+/// only as a cross-reference against the relation-assembly log.
+struct BatchProfile {
+    features: usize,
+    total_input_coords: u64,
+    largest_input_id: u64,
+    largest_input_coords: usize,
+    total_predicted_pieces: u64,
+    max_predicted_id: u64,
+    max_predicted_pieces: u64,
+}
+
+/// Characterize a batch before rendering: summed/peak input coords (for
+/// cross-reference) and summed/peak *predicted* output pieces (the size
+/// driver). One pass, O(batch coords), negligible beside the render it precedes.
+fn profile_batch(batch: &[VectorFeature], render_options: &RenderOptions) -> BatchProfile {
+    let mut profile = BatchProfile {
+        features: batch.len(),
+        total_input_coords: 0,
+        largest_input_id: 0,
+        largest_input_coords: 0,
+        total_predicted_pieces: 0,
+        max_predicted_id: 0,
+        max_predicted_pieces: 0,
+    };
+    for feature in batch {
+        let coords = feature.geometry.coords_count();
+        profile.total_input_coords += coords as u64;
+        if coords > profile.largest_input_coords {
+            profile.largest_input_coords = coords;
+            profile.largest_input_id = feature.id;
+        }
+        let predicted = predict_pieces(feature, render_options);
+        profile.total_predicted_pieces += predicted;
+        if predicted > profile.max_predicted_pieces {
+            profile.max_predicted_pieces = predicted;
+            profile.max_predicted_id = feature.id;
+        }
+    }
+    profile
+}
 
 /// H-A render-flush instrumentation. Accumulates the per-flush rendered-output
 /// size distribution so a long run leaves a trajectory in the log instead of
@@ -223,9 +270,12 @@ struct RenderProbe {
     flushes: u64,
     total_pieces: u64,
     total_bytes: u64,
+    total_predicted_pieces: u64,
     max_flush_pieces: usize,
     max_flush_bytes: usize,
     max_flush_input_id: u64,
+    max_flush_predicted_pieces: u64,
+    max_flush_predicted_id: u64,
     last_summary: std::time::Instant,
 }
 
@@ -235,31 +285,45 @@ impl RenderProbe {
             flushes: 0,
             total_pieces: 0,
             total_bytes: 0,
+            total_predicted_pieces: 0,
             max_flush_pieces: 0,
             max_flush_bytes: 0,
             max_flush_input_id: 0,
+            max_flush_predicted_pieces: 0,
+            max_flush_predicted_id: 0,
             last_summary: std::time::Instant::now(),
         }
     }
 
-    /// Record one flush's rendered output and emit a throttled running summary.
-    /// `largest_input_id` is the id of the batch's biggest input feature — the
-    /// prime suspect when a flush explodes.
-    fn record(&mut self, pieces: usize, bytes: usize, largest_input_id: u64) {
+    /// Record one flush's rendered output against the pre-render `profile` and
+    /// emit a throttled running summary. Logging `predicted` beside the realized
+    /// pieces is the fidelity receipt: a predicted/actual ratio near 1 means the
+    /// budget the fix will chunk on is tight enough to leave the common path a
+    /// single chunk; a large ratio means the predictor over-fires and the fix
+    /// design needs revisiting — measured before any bounding code is written.
+    fn record(&mut self, profile: &BatchProfile, pieces: usize, bytes: usize) {
         self.flushes += 1;
         self.total_pieces += pieces as u64;
         self.total_bytes += bytes as u64;
+        self.total_predicted_pieces += profile.total_predicted_pieces;
         if bytes > self.max_flush_bytes {
             self.max_flush_bytes = bytes;
             self.max_flush_pieces = pieces;
-            self.max_flush_input_id = largest_input_id;
+            self.max_flush_input_id = profile.largest_input_id;
+            self.max_flush_predicted_pieces = profile.max_predicted_pieces;
+            self.max_flush_predicted_id = profile.max_predicted_id;
         }
-        // A single oversized flush is the H-A signature; log it as it happens.
+        // A single oversized flush is the H-A signature; log it as it happens,
+        // naming the predicted *output* monster (predicted_id, the feature the
+        // pre-render warning flagged) beside the realized size — not just the
+        // largest-input feature, which the probe proved is the wrong suspect.
         if pieces > FLUSH_PIECES_WARN || bytes > FLUSH_BYTES_WARN {
             tracing::warn!(
                 pieces,
                 bytes,
-                largest_input_id,
+                predicted_pieces = profile.max_predicted_pieces,
+                predicted_id = profile.max_predicted_id,
+                largest_input_id = profile.largest_input_id,
                 "render flush: large rendered working set"
             );
         }
@@ -275,9 +339,12 @@ impl RenderProbe {
             flushes = self.flushes,
             total_pieces = self.total_pieces,
             total_bytes = self.total_bytes,
+            total_predicted_pieces = self.total_predicted_pieces,
             max_flush_pieces = self.max_flush_pieces,
             max_flush_bytes = self.max_flush_bytes,
             max_flush_input_id = self.max_flush_input_id,
+            max_flush_predicted_pieces = self.max_flush_predicted_pieces,
+            max_flush_predicted_id = self.max_flush_predicted_id,
             "render probe summary"
         );
     }
@@ -295,29 +362,22 @@ fn flush_render_batch(
     if batch.is_empty() {
         return Ok(());
     }
-    // Probe: characterize the batch's input geometry *before* the par-render.
-    // A batch whose summed input coords are huge is the H-A death signature —
-    // the render below can expand one monster multipolygon into a multi-GB
-    // `rendered` Vec across every rayon worker. Logging it before the alloc
-    // means "this line, then silence" localizes the wall to this site.
-    let mut total_input_coords: u64 = 0;
-    let mut largest_input_id = 0u64;
-    let mut largest_input_coords = 0usize;
-    for feature in batch.iter() {
-        let coords = feature.geometry.coords_count();
-        total_input_coords += coords as u64;
-        if coords > largest_input_coords {
-            largest_input_coords = coords;
-            largest_input_id = feature.id;
-        }
-    }
-    if total_input_coords > PRE_RENDER_COORD_WARN {
+    // Probe: characterize the batch *before* the par-render. A feature whose
+    // predicted output pieces are huge is the H-A death signature — the render
+    // below expands it into a multi-GB `rendered` Vec across every rayon
+    // worker. Logging it before the alloc means "this line, then silence"
+    // localizes the wall to this site and names the offending feature id.
+    let profile = profile_batch(batch, render_options);
+    if profile.max_predicted_pieces > PRE_RENDER_PIECES_WARN {
         tracing::warn!(
-            features = batch.len(),
-            total_input_coords,
-            largest_input_id,
-            largest_input_coords,
-            "render batch: large input about to expand"
+            features = profile.features,
+            max_predicted_id = profile.max_predicted_id,
+            max_predicted_pieces = profile.max_predicted_pieces,
+            total_predicted_pieces = profile.total_predicted_pieces,
+            largest_input_id = profile.largest_input_id,
+            largest_input_coords = profile.largest_input_coords,
+            total_input_coords = profile.total_input_coords,
+            "render batch: feature predicted to expand into a huge tile-piece set"
         );
     }
     let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = batch
@@ -344,7 +404,7 @@ fn flush_render_batch(
         .iter()
         .map(|(_, layer, _, blob)| blob.len() + layer.len())
         .sum();
-    probe.record(pieces, bytes, largest_input_id);
+    probe.record(&profile, pieces, bytes);
     for (coord, layer_name, zorder, blob) in rendered {
         let layer = registry.intern(&layer_name)?;
         sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
@@ -445,8 +505,16 @@ impl WriteProbe {
     /// Throttled progress line (every `WRITE_LOG_ENTRIES` entries or
     /// `PROBE_WRITE_SECS`), including the current tile's live working set.
     fn maybe_log(&mut self, current: &RawTile) {
+        // Consult the wall clock only on a coarse entry stride. At planet scale
+        // the merge thread pulls billions of entries and the count condition is
+        // almost always true, so an unmasked `Instant::elapsed()` per entry is
+        // tens of seconds of pure syscall on the serial path. Short-circuiting
+        // on the stride keeps the clock call to ~once per 64Ki entries; this is
+        // logging-only, so nothing grouped, sent, or written changes.
+        const CLOCK_STRIDE: u64 = 1 << 16;
         if self.entries_consumed - self.last_log_entries < WRITE_LOG_ENTRIES
-            && self.last_log.elapsed().as_secs() < PROBE_WRITE_SECS
+            && (!self.entries_consumed.is_multiple_of(CLOCK_STRIDE)
+                || self.last_log.elapsed().as_secs() < PROBE_WRITE_SECS)
         {
             return;
         }
