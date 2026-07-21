@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::mpsc;
 
+use geo::CoordsIter;
 use geo_types::Geometry;
 use rayon::prelude::*;
 
@@ -119,6 +120,7 @@ where
     // The profile pass, stats, and bounds stay serial and cheap; a full batch is
     // rendered + blob-encoded across cores (order preserved for determinism) and
     // fed to the sort.
+    let mut render_probe = RenderProbe::new();
     let stream_start = std::time::Instant::now();
     {
         let mut sink = |source: SourceFeature| -> Result<()> {
@@ -131,13 +133,26 @@ where
                 batch.push(feature);
             }
             if batch.len() >= RENDER_BATCH {
-                flush_render_batch(&mut batch, &render_options, &mut registry, &mut sort)?;
+                flush_render_batch(
+                    &mut batch,
+                    &render_options,
+                    &mut registry,
+                    &mut sort,
+                    &mut render_probe,
+                )?;
             }
             Ok(())
         };
         stream(&mut sink)?;
     }
-    flush_render_batch(&mut batch, &render_options, &mut registry, &mut sort)?;
+    flush_render_batch(
+        &mut batch,
+        &render_options,
+        &mut registry,
+        &mut sort,
+        &mut render_probe,
+    )?;
+    render_probe.log_summary(true);
     tracing::info!(
         elapsed_s = stream_start.elapsed().as_secs_f64(),
         entries = sort.len(),
@@ -190,6 +205,84 @@ pub fn generate(
     )
 }
 
+// Render-flush probe thresholds (instrumentation only; see `RenderProbe`). A
+// batch whose summed *input* coords exceed this is warned before the render
+// alloc; a single flush whose *output* exceeds either bound is warned after.
+const PRE_RENDER_COORD_WARN: u64 = 10_000_000;
+const FLUSH_PIECES_WARN: usize = 100_000;
+const FLUSH_BYTES_WARN: usize = 256 << 20;
+const PROBE_RENDER_SUMMARY_SECS: u64 = 30;
+
+/// H-A render-flush instrumentation. Accumulates the per-flush rendered-output
+/// size distribution so a long run leaves a trajectory in the log instead of
+/// dying silently, and flags any single flush whose rendered working set is
+/// large — the batch that, at planet scale, expands a monster multipolygon into
+/// the anonymous-heap runaway that walls the write stage. Pure observation: it
+/// never touches sort-feed order or contents, so output stays byte-identical.
+struct RenderProbe {
+    flushes: u64,
+    total_pieces: u64,
+    total_bytes: u64,
+    max_flush_pieces: usize,
+    max_flush_bytes: usize,
+    max_flush_input_id: u64,
+    last_summary: std::time::Instant,
+}
+
+impl RenderProbe {
+    fn new() -> Self {
+        Self {
+            flushes: 0,
+            total_pieces: 0,
+            total_bytes: 0,
+            max_flush_pieces: 0,
+            max_flush_bytes: 0,
+            max_flush_input_id: 0,
+            last_summary: std::time::Instant::now(),
+        }
+    }
+
+    /// Record one flush's rendered output and emit a throttled running summary.
+    /// `largest_input_id` is the id of the batch's biggest input feature — the
+    /// prime suspect when a flush explodes.
+    fn record(&mut self, pieces: usize, bytes: usize, largest_input_id: u64) {
+        self.flushes += 1;
+        self.total_pieces += pieces as u64;
+        self.total_bytes += bytes as u64;
+        if bytes > self.max_flush_bytes {
+            self.max_flush_bytes = bytes;
+            self.max_flush_pieces = pieces;
+            self.max_flush_input_id = largest_input_id;
+        }
+        // A single oversized flush is the H-A signature; log it as it happens.
+        if pieces > FLUSH_PIECES_WARN || bytes > FLUSH_BYTES_WARN {
+            tracing::warn!(
+                pieces,
+                bytes,
+                largest_input_id,
+                "render flush: large rendered working set"
+            );
+        }
+        if self.last_summary.elapsed().as_secs() >= PROBE_RENDER_SUMMARY_SECS {
+            self.log_summary(false);
+            self.last_summary = std::time::Instant::now();
+        }
+    }
+
+    fn log_summary(&self, final_run: bool) {
+        tracing::info!(
+            final_run,
+            flushes = self.flushes,
+            total_pieces = self.total_pieces,
+            total_bytes = self.total_bytes,
+            max_flush_pieces = self.max_flush_pieces,
+            max_flush_bytes = self.max_flush_bytes,
+            max_flush_input_id = self.max_flush_input_id,
+            "render probe summary"
+        );
+    }
+}
+
 /// Render + blob-encode a batch of vector features across cores, intern their
 /// layers, and feed them to the sort. Clears the batch.
 fn flush_render_batch(
@@ -197,9 +290,35 @@ fn flush_render_batch(
     render_options: &RenderOptions,
     registry: &mut LayerRegistry,
     sort: &mut ExternalMergeSort,
+    probe: &mut RenderProbe,
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
+    }
+    // Probe: characterize the batch's input geometry *before* the par-render.
+    // A batch whose summed input coords are huge is the H-A death signature —
+    // the render below can expand one monster multipolygon into a multi-GB
+    // `rendered` Vec across every rayon worker. Logging it before the alloc
+    // means "this line, then silence" localizes the wall to this site.
+    let mut total_input_coords: u64 = 0;
+    let mut largest_input_id = 0u64;
+    let mut largest_input_coords = 0usize;
+    for feature in batch.iter() {
+        let coords = feature.geometry.coords_count();
+        total_input_coords += coords as u64;
+        if coords > largest_input_coords {
+            largest_input_coords = coords;
+            largest_input_id = feature.id;
+        }
+    }
+    if total_input_coords > PRE_RENDER_COORD_WARN {
+        tracing::warn!(
+            features = batch.len(),
+            total_input_coords,
+            largest_input_id,
+            largest_input_coords,
+            "render batch: large input about to expand"
+        );
     }
     let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = batch
         .par_iter()
@@ -217,6 +336,15 @@ fn flush_render_batch(
                 })
         })
         .collect();
+    // Probe: characterize the rendered output — the term that piles up as
+    // anonymous heap in H-A. `bytes` counts the retained blob + layer-name
+    // bytes, the working set that outlives this call until fed to the sort.
+    let pieces = rendered.len();
+    let bytes: usize = rendered
+        .iter()
+        .map(|(_, layer, _, blob)| blob.len() + layer.len())
+        .sum();
+    probe.record(pieces, bytes, largest_input_id);
     for (coord, layer_name, zorder, blob) in rendered {
         let layer = registry.intern(&layer_name)?;
         sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
@@ -230,6 +358,148 @@ fn flush_render_batch(
 struct RawTile {
     coord: TileCoord,
     entries: Vec<Entry>,
+}
+
+// Write-stage probe knobs (instrumentation only; see `WriteProbe`).
+const WRITE_HEAD_KEYS: usize = 20;
+const WRITE_LOG_ENTRIES: u64 = 5_000_000;
+const PROBE_WRITE_SECS: u64 = 10;
+
+/// H-B write-stage instrumentation for the merge thread. Dumps the first keys
+/// (catches key corruption / unexpected zoom bits instantly), tracks the
+/// largest single tile's working set — the term that runs away if a mega-tile
+/// materializes — and emits a throttled progress trajectory. `current_bytes`
+/// shadows the current tile's kept value bytes incrementally. Pure observation:
+/// nothing here changes what is grouped, sent, or written, so output stays
+/// byte-identical.
+struct WriteProbe {
+    entries_consumed: u64,
+    tiles_completed: u64,
+    batches_sent: u64,
+    current_bytes: usize,
+    max_tile_entries: usize,
+    max_tile_bytes: usize,
+    max_tile_coord: Option<TileCoord>,
+    head_keys: Vec<(u8, u32, u32, u8)>,
+    head_logged: bool,
+    last_log: std::time::Instant,
+    last_log_entries: u64,
+}
+
+impl WriteProbe {
+    fn new() -> Self {
+        Self {
+            entries_consumed: 0,
+            tiles_completed: 0,
+            batches_sent: 0,
+            current_bytes: 0,
+            max_tile_entries: 0,
+            max_tile_bytes: 0,
+            max_tile_coord: None,
+            head_keys: Vec::new(),
+            head_logged: false,
+            last_log: std::time::Instant::now(),
+            last_log_entries: 0,
+        }
+    }
+
+    /// One entry pulled from the sorted stream (kept or dropped).
+    fn on_consume(&mut self, key: SortKey) {
+        self.entries_consumed += 1;
+        if !self.head_logged {
+            if self.head_keys.len() < WRITE_HEAD_KEYS {
+                self.head_keys
+                    .push((key.z(), key.x(), key.y(), key.layer()));
+            }
+            if self.head_keys.len() >= WRITE_HEAD_KEYS {
+                self.log_head_keys();
+                self.head_logged = true;
+            }
+        }
+    }
+
+    /// A fresh tile has started; reset the per-tile byte shadow.
+    fn on_tile_start(&mut self) {
+        self.current_bytes = 0;
+    }
+
+    /// An entry was kept into the current tile.
+    fn on_keep(&mut self, value_bytes: usize) {
+        self.current_bytes += value_bytes;
+    }
+
+    /// The current tile finished; fold it into the max-tile tracker.
+    fn on_tile_done(&mut self, coord: TileCoord, entries: usize) {
+        self.tiles_completed += 1;
+        if self.current_bytes > self.max_tile_bytes {
+            self.max_tile_bytes = self.current_bytes;
+            self.max_tile_entries = entries;
+            self.max_tile_coord = Some(coord);
+        }
+    }
+
+    fn on_batch_sent(&mut self) {
+        self.batches_sent += 1;
+    }
+
+    /// Throttled progress line (every `WRITE_LOG_ENTRIES` entries or
+    /// `PROBE_WRITE_SECS`), including the current tile's live working set.
+    fn maybe_log(&mut self, current: &RawTile) {
+        if self.entries_consumed - self.last_log_entries < WRITE_LOG_ENTRIES
+            && self.last_log.elapsed().as_secs() < PROBE_WRITE_SECS
+        {
+            return;
+        }
+        tracing::info!(
+            entries_consumed = self.entries_consumed,
+            tiles_completed = self.tiles_completed,
+            batches_sent = self.batches_sent,
+            cur_z = current.coord.z(),
+            cur_x = current.coord.x(),
+            cur_y = current.coord.y(),
+            cur_entries = current.entries.len(),
+            cur_bytes = self.current_bytes,
+            max_tile_entries = self.max_tile_entries,
+            max_tile_bytes = self.max_tile_bytes,
+            "merge progress"
+        );
+        self.last_log = std::time::Instant::now();
+        self.last_log_entries = self.entries_consumed;
+    }
+
+    fn log_head_keys(&self) {
+        let formatted: Vec<String> = self
+            .head_keys
+            .iter()
+            .map(|(z, x, y, l)| format!("{z}/{x}/{y}#{l}"))
+            .collect();
+        tracing::info!(
+            count = self.head_keys.len(),
+            keys = %formatted.join(" "),
+            "merge head keys"
+        );
+    }
+
+    fn finish(&self) {
+        if !self.head_logged && !self.head_keys.is_empty() {
+            self.log_head_keys();
+        }
+        let (max_z, max_x, max_y) = self
+            .max_tile_coord
+            .map(|c| (c.z(), c.x(), c.y()))
+            .unwrap_or((0, 0, 0));
+        tracing::info!(
+            entries_consumed = self.entries_consumed,
+            tiles_completed = self.tiles_completed,
+            batches_sent = self.batches_sent,
+            max_tile_entries = self.max_tile_entries,
+            max_tile_bytes = self.max_tile_bytes,
+            max_tile_z = max_z,
+            max_tile_x = max_x,
+            max_tile_y = max_y,
+            "merge done (probe)"
+        );
+    }
 }
 
 /// Stream the sorted entries and write finished tiles, overlapping three
@@ -271,11 +541,14 @@ fn write_sorted_tiles(
             // within a tile arrive layer-contiguous (the layer sits above the
             // zorder in the sort key), so one counter implements the cap.
             let mut layer_seen = (0u8, 0usize);
+            let mut probe = WriteProbe::new();
             for entry in sort.into_sorted()? {
                 let entry = entry?;
+                probe.on_consume(entry.key);
                 let tile = entry.key.tile();
                 if current.as_ref().map(|raw| raw.coord) != Some(tile) {
                     if let Some(done) = current.take() {
+                        probe.on_tile_done(done.coord, done.entries.len());
                         batch_entries += done.entries.len();
                         batch.push(done);
                         if batch.len() >= BATCH_TILES || batch_entries >= BATCH_ENTRIES {
@@ -284,6 +557,7 @@ fn write_sorted_tiles(
                                 // error is the one worth reporting.
                                 return Ok(dropped);
                             }
+                            probe.on_batch_sent();
                             batch_entries = 0;
                         }
                     }
@@ -292,6 +566,7 @@ fn write_sorted_tiles(
                         entries: Vec::new(),
                     });
                     layer_seen = (0, 0);
+                    probe.on_tile_start();
                 }
                 // Cap kept features per tile-layer so a low-zoom mega-tile
                 // can't decode millions of features downstream. Entries arrive
@@ -308,40 +583,53 @@ fn write_sorted_tiles(
                     }
                     layer_seen.1 += 1;
                 }
-                current
+                probe.on_keep(entry.value.len());
+                let tile_ref = current
                     .as_mut()
-                    .expect("current tile is set at the boundary above")
-                    .entries
-                    .push(entry);
+                    .expect("current tile is set at the boundary above");
+                tile_ref.entries.push(entry);
+                probe.maybe_log(tile_ref);
             }
             if let Some(done) = current.take() {
+                probe.on_tile_done(done.coord, done.entries.len());
                 batch.push(done);
             }
             if !batch.is_empty() {
                 let _ = raw_tx.send(batch);
+                probe.on_batch_sent();
             }
+            probe.finish();
             Ok(dropped)
         });
 
         // Stage 2: decode + post-process + encode + compress each batch across
         // the rayon pool. The parallel collect preserves tile order.
         let encoder = scope.spawn(move || -> Result<()> {
+            let mut batches_done: u64 = 0;
+            let mut last_log = std::time::Instant::now();
             while let Ok(batch) = raw_rx.recv() {
                 let encoded = batch
                     .into_par_iter()
                     .map(|raw| encode_raw_tile(raw, registry, profile, extent, compression))
                     .collect::<Result<Vec<Option<(TileCoord, Vec<u8>)>>>>()?;
                 let encoded: Vec<(TileCoord, Vec<u8>)> = encoded.into_iter().flatten().collect();
+                batches_done += 1;
+                if last_log.elapsed().as_secs() >= PROBE_WRITE_SECS {
+                    tracing::info!(batches_done, "encode progress");
+                    last_log = std::time::Instant::now();
+                }
                 if encoded_tx.send(encoded).is_err() {
                     return Ok(()); // the writer failed; its error wins
                 }
             }
+            tracing::info!(batches_done, "encode done (probe)");
             Ok(())
         });
 
         // Stage 3 (this thread): the serial archive writer.
         let mut tiles_written = 0usize;
         let mut write_result: Result<()> = Ok(());
+        let mut last_write_log = std::time::Instant::now();
         'writing: while let Ok(batch) = encoded_rx.recv() {
             for (coord, bytes) in batch {
                 if let Err(e) = writer.write_tile_compressed(coord, &bytes) {
@@ -349,6 +637,10 @@ fn write_sorted_tiles(
                     break 'writing; // dropping the receiver unwinds the stages
                 }
                 tiles_written += 1;
+            }
+            if last_write_log.elapsed().as_secs() >= PROBE_WRITE_SECS {
+                tracing::info!(tiles_written, "write progress");
+                last_write_log = std::time::Instant::now();
             }
         }
 
