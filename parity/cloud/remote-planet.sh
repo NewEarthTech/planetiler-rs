@@ -124,31 +124,56 @@ tiles_in() { sqlite3 "$1" 'select count(*) from tiles' 2>/dev/null || echo "?"; 
 #   1. The run's stderr goes straight to a file on the EBS root ($HOME), which
 #      survives a wedge and a reboot, and is not behind a pipe buffer. It is
 #      grepped for the report only after the run ends.
-#   2. A sampler records VmRSS + major-fault count every 10 s to the same
-#      durable spot, and a watchdog SIGKILLs the run if RSS crosses a ceiling —
-#      so a memory blowup is captured and killed cleanly on one process instead
-#      of taking the box down. Peak RSS and wall come from the sampler, so
-#      /usr/bin/time (which only sees the wrapper, not the child) is dropped.
-RSS_CEILING_KB=$(( 220 * 1024 * 1024 ))   # of the box's ~247 GB usable
+#   2. A sampler records VmRSS, anonymous RSS, and the major-fault count to the
+#      same durable spot, and a watchdog SIGKILLs the run if memory crosses a
+#      ceiling — so a blowup is captured and killed cleanly on one process
+#      instead of taking the box down. Peak RSS and wall come from the sampler,
+#      so /usr/bin/time (which only sees the wrapper, not the child) is dropped.
+#
+# The honest kill metric is anonymous RSS, not VmRSS: at planet scale VmRSS
+# carries ~85 GB of node/way store that is file-backed and freely evictable, so
+# the anon column is what actually OOMs the box (runs C and D died on ~100 GB of
+# it climbing ~2.9 GB/s, major faults dead flat). Kill on anon > 200 GB; keep a
+# VmRSS backstop below the ~247 GB wall for a file-backed pathology anon misses.
+# In the C/D trajectory VmRSS RAM-limited near 246 before anon read 200, so the
+# backstop is load-bearing there, not decoration — set with headroom, well above
+# any healthy run (~130 GB). Sampling tightens from 10 s to 2 s past a danger
+# line because a 10 s gap let VmRSS jump 29 GB between samples in C/D, so both
+# the kill and the recorded trajectory overshot.
+ANON_CEILING_KB=$(( 200 * 1024 * 1024 ))
+RSS_CEILING_KB=$(( 235 * 1024 * 1024 ))
+DANGER_KB=$(( 180 * 1024 * 1024 ))
 RS_STDERR="$HOME/planet-rs.stderr"
 MEM_LOG="$HOME/planet-mem.log"
 
 sample_and_guard() {  # $1 = pid to watch
-  local pid=$1 rss majflt avail load
-  echo "ts vmrss_kb majflt memavail_kb load1" > "$MEM_LOG"
+  local pid=$1 rss anon majflt avail load interval
+  echo "ts vmrss_kb anon_kb majflt memavail_kb load1" > "$MEM_LOG"
   while kill -0 "$pid" 2>/dev/null; do
     rss=$(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null)
+    anon=$(awk '/^Anonymous:/{print $2}' "/proc/$pid/smaps_rollup" 2>/dev/null)
     majflt=$(awk '{print $12}' "/proc/$pid/stat" 2>/dev/null)
     avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
     load=$(awk '{print $1}' /proc/loadavg)
-    echo "$(date +%s) ${rss:-0} ${majflt:-0} ${avail:-0} ${load:-0}" >> "$MEM_LOG"
-    if [ "${rss:-0}" -gt "$RSS_CEILING_KB" ] 2>/dev/null; then
-      echo "WATCHDOG $(date -u +%H:%M:%SZ): VmRSS ${rss}KB over ceiling; killing pid $pid" \
+    echo "$(date +%s) ${rss:-0} ${anon:-0} ${majflt:-0} ${avail:-0} ${load:-0}" >> "$MEM_LOG"
+    if [ "${anon:-0}" -gt "$ANON_CEILING_KB" ] 2>/dev/null; then
+      echo "WATCHDOG $(date -u +%H:%M:%SZ): Anonymous ${anon}KB over anon ceiling; killing pid $pid" \
         | tee -a "$MEM_LOG" "$REPORT"
       kill -KILL "$pid" 2>/dev/null
       return
     fi
-    sleep 10
+    if [ "${rss:-0}" -gt "$RSS_CEILING_KB" ] 2>/dev/null; then
+      echo "WATCHDOG $(date -u +%H:%M:%SZ): VmRSS ${rss}KB over backstop ceiling; killing pid $pid" \
+        | tee -a "$MEM_LOG" "$REPORT"
+      kill -KILL "$pid" 2>/dev/null
+      return
+    fi
+    # 10 s steady, 2 s once memory is high — see the DANGER_KB note above.
+    interval=10
+    if [ "${rss:-0}" -gt "$DANGER_KB" ] 2>/dev/null || [ "${anon:-0}" -gt "$DANGER_KB" ] 2>/dev/null; then
+      interval=2
+    fi
+    sleep "$interval"
   done
 }
 
@@ -169,12 +194,16 @@ wait "$RS_PID"; RS_RC=$?
 kill "$MON_PID" 2>/dev/null || true
 RS_END=$(date +%s)
 
-PEAK_KB=$(awk 'NR>1 && $2>m{m=$2} END{print m+0}' "$MEM_LOG")
+# Consider only data rows (epoch-timestamp first field), so the header and the
+# tee'd "WATCHDOG ..." trailer can't corrupt the max — awk would otherwise
+# string-compare a field like "Anonymous" as greater than any number.
+PEAK_KB=$(awk '$1 ~ /^[0-9]+$/ && $2>m{m=$2} END{print m+0}' "$MEM_LOG")
+PEAK_ANON_KB=$(awk '$1 ~ /^[0-9]+$/ && $3>m{m=$3} END{print m+0}' "$MEM_LOG")
 # The pipeline's own stage timers and the two pre-flight unknowns (run-index
 # heap, merge chunk count), pulled from the durable stderr after the fact.
 grep -E "sparse node store|k-way merge|chunk|pass 1|pass 2|stream \+ render|merge \+ encode" \
   "$RS_STDERR" | sed -E 's/^[[:space:]]+//' | tee -a "$REPORT" || true
-say "rs wall_s: $((RS_END - RS_START))  peak_rss_kb: ${PEAK_KB}  peak_rss_gb: $(( PEAK_KB / 1024 / 1024 ))  rc: $RS_RC"
+say "rs wall_s: $((RS_END - RS_START))  peak_vmrss_gb: $(( PEAK_KB / 1024 / 1024 ))  peak_anon_gb: $(( PEAK_ANON_KB / 1024 / 1024 ))  peak_rss_kb: ${PEAK_KB}  rc: $RS_RC"
 say "rs mem trajectory: $MEM_LOG ($(wc -l < "$MEM_LOG") samples)"
 
 if [ "$RS_RC" = 0 ] && [ -f /data/out/rs.mbtiles ]; then
