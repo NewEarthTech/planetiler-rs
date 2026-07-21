@@ -214,6 +214,18 @@ const FLUSH_PIECES_WARN: usize = 100_000;
 const FLUSH_BYTES_WARN: usize = 256 << 20;
 const PROBE_RENDER_SUMMARY_SECS: u64 = 30;
 
+/// Cut the render batch into sub-chunks whose summed *predicted* pieces stay
+/// under this, so the resident rendered working set is bounded to ~one sub-chunk
+/// rather than a whole 4096-feature batch — the H-A fix, where a cluster of
+/// monster multipolygons in one batch rendered concurrently into a multi-GB
+/// `Vec` and walled the run. At the tag-heavy monster rate (~7.7 KB/piece,
+/// measured on the planet) this caps a sub-chunk near 256 MB; normal batches
+/// predict far below it (great-britain averaged ~4k pieces/flush), so they stay
+/// a single chunk — today's exact full-batch code path, unchanged. A single
+/// feature predicted over budget still renders whole (its own sub-chunk);
+/// bounding that intra-feature term is slab-mode's job, a separate step.
+const RENDER_CHUNK_PIECES: u64 = 32_768;
+
 /// A batch's input geometry characterized *before* the par-render, so a monster
 /// is named in the log ahead of the allocation storm it triggers. `predicted`
 /// pieces (summed covered-tile area, [`predict_pieces`]) is the size driver —
@@ -230,12 +242,14 @@ struct BatchProfile {
     max_predicted_pieces: u64,
 }
 
-/// Characterize a batch before rendering: summed/peak input coords (for
-/// cross-reference) and summed/peak *predicted* output pieces (the size
-/// driver). One pass, O(batch coords), negligible beside the render it precedes.
-fn profile_batch(batch: &[VectorFeature], render_options: &RenderOptions) -> BatchProfile {
+/// Characterize a (sub-)chunk before rendering: summed/peak input coords (for
+/// cross-reference) and summed/peak predicted output pieces (the size driver),
+/// the latter read from the pre-computed `predicted` slice. `chunk` and
+/// `predicted` are parallel and equal length. One pass, negligible beside the
+/// render it precedes.
+fn profile_batch(chunk: &[VectorFeature], predicted: &[u64]) -> BatchProfile {
     let mut profile = BatchProfile {
-        features: batch.len(),
+        features: chunk.len(),
         total_input_coords: 0,
         largest_input_id: 0,
         largest_input_coords: 0,
@@ -243,14 +257,13 @@ fn profile_batch(batch: &[VectorFeature], render_options: &RenderOptions) -> Bat
         max_predicted_id: 0,
         max_predicted_pieces: 0,
     };
-    for feature in batch {
+    for (feature, &predicted) in chunk.iter().zip(predicted) {
         let coords = feature.geometry.coords_count();
         profile.total_input_coords += coords as u64;
         if coords > profile.largest_input_coords {
             profile.largest_input_coords = coords;
             profile.largest_input_id = feature.id;
         }
-        let predicted = predict_pieces(feature, render_options);
         profile.total_predicted_pieces += predicted;
         if predicted > profile.max_predicted_pieces {
             profile.max_predicted_pieces = predicted;
@@ -258,6 +271,31 @@ fn profile_batch(batch: &[VectorFeature], render_options: &RenderOptions) -> Bat
         }
     }
     profile
+}
+
+/// Partition per-feature `predicted` piece counts (in batch order) into
+/// contiguous index ranges whose summed prediction stays under `budget`. A
+/// feature whose own prediction alone would overflow the budget forms a
+/// singleton range (it cannot be split without slab-mode). The ranges cover
+/// `0..predicted.len()` in order with no gaps or overlaps, so rendering them in
+/// sequence and feeding each to the sort reproduces the exact whole-batch feed
+/// order — the property that makes chunking byte-identical to a single collect.
+fn chunk_ranges(predicted: &[u64], budget: u64) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut acc = 0u64;
+    for (i, &p) in predicted.iter().enumerate() {
+        if i > start && acc.saturating_add(p) > budget {
+            ranges.push(start..i);
+            start = i;
+            acc = 0;
+        }
+        acc = acc.saturating_add(p);
+    }
+    if start < predicted.len() {
+        ranges.push(start..predicted.len());
+    }
+    ranges
 }
 
 /// H-A render-flush instrumentation. Accumulates the per-flush rendered-output
@@ -362,12 +400,47 @@ fn flush_render_batch(
     if batch.is_empty() {
         return Ok(());
     }
-    // Probe: characterize the batch *before* the par-render. A feature whose
+    // Predict each feature's rendered pieces once (an over-estimate of what the
+    // render emits), then cut the batch into predicted-bounded sub-chunks and
+    // render each in turn so the resident `rendered` Vec never spans the whole
+    // batch. Sub-chunks are contiguous and in order and each collect preserves
+    // order, so the concatenated sort-feed is byte-for-byte identical to a
+    // single whole-batch collect.
+    let predicted: Vec<u64> = batch
+        .iter()
+        .map(|feature| predict_pieces(feature, render_options))
+        .collect();
+    for range in chunk_ranges(&predicted, RENDER_CHUNK_PIECES) {
+        render_chunk(
+            &batch[range.clone()],
+            &predicted[range],
+            render_options,
+            registry,
+            sort,
+            probe,
+        )?;
+    }
+    batch.clear();
+    Ok(())
+}
+
+/// Render one sub-chunk of a batch and feed it to the sort in order. Isolated so
+/// its `rendered` Vec is freed before the next sub-chunk starts, which is what
+/// bounds peak render memory to one sub-chunk's worth.
+fn render_chunk(
+    chunk: &[VectorFeature],
+    predicted: &[u64],
+    render_options: &RenderOptions,
+    registry: &mut LayerRegistry,
+    sort: &mut ExternalMergeSort,
+    probe: &mut RenderProbe,
+) -> Result<()> {
+    // Probe: characterize the chunk *before* the par-render. A feature whose
     // predicted output pieces are huge is the H-A death signature — the render
     // below expands it into a multi-GB `rendered` Vec across every rayon
     // worker. Logging it before the alloc means "this line, then silence"
     // localizes the wall to this site and names the offending feature id.
-    let profile = profile_batch(batch, render_options);
+    let profile = profile_batch(chunk, predicted);
     if profile.max_predicted_pieces > PRE_RENDER_PIECES_WARN {
         tracing::warn!(
             features = profile.features,
@@ -380,7 +453,7 @@ fn flush_render_batch(
             "render batch: feature predicted to expand into a huge tile-piece set"
         );
     }
-    let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = batch
+    let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = chunk
         .par_iter()
         .flat_map_iter(|feature| {
             render_feature(feature, render_options)
@@ -409,7 +482,6 @@ fn flush_render_batch(
         let layer = registry.intern(&layer_name)?;
         sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
     }
-    batch.clear();
     Ok(())
 }
 
@@ -1195,5 +1267,41 @@ mod tests {
             }
             other => panic!("expected lines, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chunk_ranges_partition_in_order_under_budget() {
+        // Empty input yields no ranges.
+        assert!(chunk_ranges(&[], 10).is_empty());
+
+        // Everything under budget stays a single chunk — the common path that
+        // must remain today's exact full-batch collect.
+        assert_eq!(chunk_ranges(&[1, 2, 3, 4], 100), vec![0..4]);
+
+        // A single over-budget feature is its own chunk; neighbours split off it.
+        assert_eq!(chunk_ranges(&[3, 100, 3], 10), vec![0..1, 1..2, 2..3]);
+
+        // Greedy fill: accumulate until the next feature would overflow.
+        assert_eq!(chunk_ranges(&[4, 4, 4], 10), vec![0..2, 2..3]);
+        assert_eq!(chunk_ranges(&[6, 6, 6], 10), vec![0..1, 1..2, 2..3]);
+
+        // Coverage + ordering invariant over a mixed sequence: ranges tile
+        // 0..n contiguously with no gaps or overlaps, and any range summing over
+        // budget is a single feature (unsplittable without slab-mode).
+        let predicted = [5u64, 5, 1, 50, 2, 3, 40, 40, 1];
+        let budget = 10;
+        let ranges = chunk_ranges(&predicted, budget);
+        let mut next = 0;
+        for r in &ranges {
+            assert_eq!(r.start, next, "no gap or overlap");
+            assert!(r.start < r.end, "non-empty range");
+            let sum: u64 = predicted[r.clone()].iter().sum();
+            assert!(
+                sum <= budget || r.len() == 1,
+                "range {r:?} sums {sum} over budget {budget} but is not a singleton"
+            );
+            next = r.end;
+        }
+        assert_eq!(next, predicted.len(), "ranges cover the whole batch");
     }
 }
