@@ -6,6 +6,8 @@ This file exists because a planet run is a multi-hour, paid-for event where the 
 
 ## First planet run (2026-07-20, r7gd.8xlarge · 32c/256 GB · us-west-2)
 
+**Superseded in part (instrumented probe, 2026-07-20 eve): the "write stage" attribution in this section is wrong — the wall is the RENDER stage (`flush_render_batch`), confirmed as hypothesis H-A. See "Planet wall confirmed — H-A" below.** Runs C and D shipped no log home, so the write-stage reading was inference from RSS shape and mtimes; an instrumented run caught the mechanism directly. The node-store vindication, chunk-count measurement, and cost findings in this section all stand.
+
 **Result: planetiler-rs does not complete a whole planet on a 256 GB box.** It builds cleanly through pass 1 and pass 2, then explodes in the write stage. Two prior attempts OOM-wedged the box (no memory guard); a third with an RSS watchdog caught it cleanly at 235 GB and preserved the trajectory. No Planetiler head-to-head yet — our runner only starts the Java side if ours completes.
 
 **The node store — the term I feared most — beat its projection.**
@@ -33,6 +35,30 @@ major faults across that climb:    685867 → 685867 → 685867 (flat)
 - A bigger box (r7gd.16xlarge, 512 GB) only buys headroom; if a single tile's materialization is unbounded it postpones the wall rather than removing it.
 
 Cost of the finding: ~$15 across four dispatches (two wedges before the watchdog existed, a healthy run whose log went to /dev/null, and this one). Lessons folded back into the runner: RSS watchdog, unbuffered stdout capture, self-cleaning scratch.
+
+## Planet wall confirmed — H-A, the render-flush working set (instrumented probe, 2026-07-20 eve)
+
+The write-stage attribution above was the best reading available from runs C and D, but those runs shipped no planetiler-rs log home — every claim was inferred from RSS shape and file mtimes. Phase 0 added a `RenderProbe` and `WriteProbe` to the pipeline (#32); Phase 1 made the runner ship its log home every poll and byte-verify it before terminating (#33 — the fix for exactly that C/D failure). One instrumented planet run (~$5, r7gd.8xlarge, `main`) then caught the mechanism directly and **falsifies the write-stage theory**: the wall is the **render** stage, and not a single tile is ever written.
+
+The site is `flush_render_batch` (`src/pipeline.rs`), which collects **every per-tile piece of a whole render batch into one unbounded `Vec`** before feeding the sort. For ~1h50m the largest such flush held a steady **15.7 MB**. Then a cluster of planet-scale multipolygons (ocean coastlines, ice shelves) arrived, each clipping into 10⁵–10⁶ z12 tiles carrying full osm-qa tags:
+
+```
+max_flush_bytes = 8.8 GB    max_flush_pieces = 1,145,294    from one feature (id 656343)
+WARN large rendered working set:  656343 = 8.8 GB, 14241863 = 4.24 GB, 12211483 = 1.6 GB, +8 more
+```
+
+Several rendering concurrently across 32 rayon workers ran the anonymous heap away, logged at ~3 s resolution:
+
+```
+VmRSS 197 → 238 GB    anon 107 → 148 GB    (lockstep, ~2 GB/s)    major faults DEAD FLAT
+→ VmRSS-backstop watchdog kill at 238 GB    ·    final_run=false    ·    0 tiles written
+```
+
+Anon peaked at 148 GB and never reached its 200 GB ceiling — VmRSS RAM-limited first, so the VmRSS backstop (235 GB) is what fired, catching it 3 GB over the line; the 2 s adaptive sampling near the ceiling kept the overshoot small where C/D overshot by 26 GB at the old 10 s cadence. The run reached the wall at ~111 min of pipeline time (C/D's inferred "~95–100 min" was a rough mtime guess). It died during `final_run=false`, so the monster features render inline during the stream, not only at a separate relation-only tail.
+
+**The fix (superseding the "Named fixes" list above):** bound `flush_render_batch`'s working set — process each batch in feature-order sub-chunks under a rendered-bytes budget (~256 MB): par-render a sub-chunk, feed the sort, drop, repeat; size sub-chunks adaptively from summed input coords so the common path (small features) keeps today's full-batch parallelism and a single monster renders alone. This is **byte-identity-safe by construction**: the external sort's output is a function of the entry multiset (total order on key+value bytes; equal entries are indistinguishable), so re-chunking the feed cannot change the output — still verified on the standard set before any further cloud spend. `--max-features-per-tile` and "stream the write stage" both targeted a stage that never runs; H-B (the write-stage single-tile term) stays a real but latent liability, not the killer.
+
+Evidence, checked in: `bench/results/planet-probe-20260720.stderr` (the full 85 KB probe log, byte-verified home) and `planet-probe-20260720-mem.log` (the 3 s memory trajectory). This was a diagnostic run, not a benchmark — mark it instrumented in any recorded numbers. Running cost across all planet dispatches is now ~$20.
 
 ## The two terms that scale badly
 
