@@ -66,7 +66,24 @@ The first bounding mechanism, built on the predictor above. `flush_render_batch`
 
 On great-britain the monster batch split as intended: flushes **10,584 → 10,611**, and the peak flush dropped from **40,154 pieces / 77 MB to 12,893 pieces / 42 MB** — the working set nearly halved with byte-identical output. Wall time was 158 s (mech 2) vs 160 s (baseline), i.e. no regression from the chunking. On the planet, where the batch holds several multi-GB monsters at once rather than GB's lone country-scale feature, the reduction is from the concurrent multi-monster aggregate down to the largest single sub-chunk — the mechanism that should let the run complete.
 
-**Owed before cloud:** the europe A/B (wall + peak RSS, `main` vs branch) to confirm the chunking adds no common-path overhead at continent scale. Deferred from this session because the box was under load ~10 for most of it; the local ladder above plus the GB timing are the interim evidence, and europe is the next session's first rung now that the box is quiet.
+### europe A/B (continent scale, `main` 30d8b01 vs branch 06ea300, 2026-07-21)
+
+Interleaved M·B·M·B, best-of-2, planet-representative flags (`--storage sparse -z12 --min-size 0 --simplify 0 --buffer 0 --sort-memory-mb 1024`), isolated TMPDIR per run, `/usr/bin/time -l`. The only heavy job on the box was the run itself (verified via `ps` — no competing pipeline; the high load numbers were the run's own pass-2/render phase).
+
+| run (order) | wall | peak RSS | stage1 render | stage2 write |
+|---|---|---|---|---|
+| main r1 (1st) | 2400.0 s | 51.90 GB | 1745.5 s | 654.0 s |
+| branch r1 (2nd) | 2568.1 s | 51.48 GB | 1862.2 s | 705.6 s |
+| main r2 (3rd) | 2485.3 s | 51.59 GB | 1774.7 s | 710.1 s |
+| branch r2 (4th) | 2530.0 s | 51.58 GB | 1843.6 s | 685.9 s |
+
+**Byte-identical, confirmed at content level.** All four runs produced identical entries (624,733,498) and tiles (739,799); the two output archives share the same sqlite SHA3 content hash on both `tiles_data` (`b97486f6…`) and `tiles_shallow` (`9bc4ae38…`), with identical `metadata` — a true logical-content match on europe, on top of the full per-tile ladder (monaco / RI / GB) above. **Peak RSS is variant-neutral** (51.5–51.9 GB, node-store-dominated; branch never higher than main).
+
+**Correction to the pre-run expectation — the record should show it.** The plan expected europe to stay single-chunk ("no relation of that class"), and this session's status updates initially repeated that. It is wrong: the predictor named **13 monster features** and chunking **split 568 batches** (branch 149,539 flushes vs main 148,971). europe has real monsters, just sub-planet-scale — and bounding them helped: the **peak render flush dropped 603 MB → 406 MB** byte-identically (main max_flush 159,164 pc / 632,952,289 B; branch 72,906 pc / 425,688,702 B). europe's monsters clear the 32,768-predicted chunk threshold but sit far below the planet's 8.8 GB, so the flush reduction doesn't move the node-store-dominated total RSS — but it demonstrates the mechanism engaging correctly on real continent data, not just in the GB smoke.
+
+**Cost, measured against a control rather than asserted.** The interleave puts branch always in even positions (2nd/4th), so variant is confounded with run-order / thermal / disk-warmth drift. The **write stage (stage2) is the control** — mechanism 2 cannot touch it — and it moves: branch's write mean is +2.0% over main's (695.8 vs 682.0 s), and the same-binary pair main-r1 vs main-r2 (no code change, later position) swings **+3.5% wall / +8.6% write** on its own. That fixes the run-to-run noise band at ~8%. Branch's render stage (stage1) is +5.3% over main's (1852.9 vs 1760.1 s mean); netting out the +2.0% the untouched write stage attributes to position leaves **~3% of the render stage (~2% of wall)** as mechanism 2's real cost. It is the `predict_pieces` per-feature precompute (one bounding-rect pass), not the chunking (568 split batches out of 149 k is 0.4%). An acceptable price for the working-set bound that makes the planet completable; a later fusion of the predict bbox into render's existing coord pass could reclaim most of it.
+
+**Residual → mechanism 3.** europe's post-mech-2 peak flush (72,906 pc / 406 MB) is a *single* feature (predicted 430,606) rendering whole as a singleton chunk — exactly slab-mode's target. So europe joins great-britain as a mechanism-3 validation datapoint.
 
 ## Next
 
