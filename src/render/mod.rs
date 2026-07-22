@@ -17,6 +17,7 @@ mod simplify;
 
 use std::collections::BTreeMap;
 
+use geo::BoundingRect;
 use geo_types::{Coord, Geometry, LineString, Polygon};
 use rayon::prelude::*;
 
@@ -95,13 +96,109 @@ pub fn render_feature(feature: &VectorFeature, options: &RenderOptions) -> Vec<R
     out
 }
 
-fn render_at_zoom(
-    feature: &VectorFeature,
-    world: &RenderGeometry,
+/// Predict, as a cheap over-estimate, how many per-tile pieces
+/// [`render_feature`] will emit for this feature — the summed covered-tile-rect
+/// area across its zoom range, taken from the raw lng/lat bounding box *before*
+/// any simplification, min-size drop, or bounds clip.
+///
+/// This is the same quantity [`render_at_zoom`] computes as `tile_count`, but
+/// derivable per feature *ahead* of the render, which is what lets the pipeline
+/// name and bound a monster before it expands. It never under-counts: simplify,
+/// min-size, and the bounds clip can each only shrink the covered rect, and
+/// clipping can only turn a covered tile empty — so `predict_pieces >=
+/// render_feature(..).len()` always holds, making it a safe budget for the
+/// render working set. Cost is one bounding-box reduction plus O(zooms)
+/// arithmetic, independent of the (possibly enormous) tile count.
+///
+/// The tile-rect arithmetic is deliberately identical to [`prepare_zoom`]'s
+/// (`scale = n * extent`, then `(scaled ± buffer) / extent`): on an unsimplified
+/// feature the predicted rect is then bit-for-bit the rect the render derives,
+/// not a differently-rounded approximation, so the over-count invariant survives
+/// even a coordinate landing exactly on a tile boundary — where a shortcut form
+/// (`world * n ± buffer/extent`) could round one tile in and under-count.
+pub fn predict_pieces(feature: &VectorFeature, options: &RenderOptions) -> u64 {
+    let Some(rect) = feature.geometry.bounding_rect() else {
+        return 0;
+    };
+    // Web-mercator maps lng linearly and lat monotonically to world space, so
+    // the world bbox is exactly the transform of the lng/lat corners (NW, SE).
+    let (ax, ay) = lng_lat_to_world(rect.min().x, rect.max().y);
+    let (bx, by) = lng_lat_to_world(rect.max().x, rect.min().y);
+    let (min_wx, max_wx) = (ax.min(bx), ax.max(bx));
+    let (min_wy, max_wy) = (ay.min(by), ay.max(by));
+
+    let min_z = feature.min_zoom.max(options.min_zoom);
+    let max_z = feature.max_zoom.min(options.max_zoom);
+    let extent = f64::from(options.extent);
+    let buffer = options.buffer;
+    let mut total: u64 = 0;
+    for z in min_z..=max_z {
+        let n = f64::from(TileCoord::axis_tiles(z));
+        let max_tile = TileCoord::axis_tiles(z) - 1;
+        // Match `prepare_zoom` exactly: scale the world bbox by `n * extent`,
+        // then take `(scaled ± buffer) / extent`. This form is monotonic in the
+        // bbox and bit-identical to the render's rect, so simplify / min-size /
+        // bounds (all of which only shrink the bbox) keep `predicted >= emitted`.
+        let scale = n * extent;
+        let tx0 = clamp_tile((min_wx * scale - buffer) / extent, max_tile);
+        let tx1 = clamp_tile((max_wx * scale + buffer) / extent, max_tile);
+        let ty0 = clamp_tile((min_wy * scale - buffer) / extent, max_tile);
+        let ty1 = clamp_tile((max_wy * scale + buffer) / extent, max_tile);
+        total += u64::from(tx1 - tx0 + 1) * u64::from(ty1 - ty0 + 1);
+    }
+    total
+}
+
+/// Prepared per-zoom render state shared by the common path ([`render_at_zoom`])
+/// and slab-mode ([`render_feature_slabbed`]): the scaled + simplified geometry,
+/// the covering tile rect (already clipped to `options.bounds`), and the clip
+/// rectangle. Both paths derive their tiles from this one struct, so they emit
+/// byte-identical pieces in the identical order.
+struct PreparedZoom {
+    geometry: RenderGeometry,
     z: u8,
-    options: &RenderOptions,
-    out: &mut Vec<RenderedFeature>,
-) {
+    extent: f64,
+    rect: Rect,
+    tx0: u32,
+    tx1: u32,
+    ty0: u32,
+    ty1: u32,
+}
+
+impl PreparedZoom {
+    /// Covering-tile count — drives the parallel-clip decision and the slab budget.
+    fn tile_count(&self) -> u64 {
+        u64::from(self.tx1 - self.tx0 + 1) * u64::from(self.ty1 - self.ty0 + 1)
+    }
+
+    /// The covering tiles in **tx-outer, ty-inner** order — the exact emission
+    /// order both the common parallel path and slab-mode preserve.
+    fn coords(&self) -> Vec<(u32, u32)> {
+        (self.tx0..=self.tx1)
+            .flat_map(|tx| (self.ty0..=self.ty1).map(move |ty| (tx, ty)))
+            .collect()
+    }
+
+    /// Clip the prepared geometry into one tile, or `None` if nothing lands.
+    fn piece(&self, feature: &VectorFeature, tx: u32, ty: u32) -> Option<RenderedFeature> {
+        clip_to_tile(&self.geometry, tx, ty, self.extent, &self.rect).map(|tile_geometry| {
+            RenderedFeature {
+                coord: TileCoord::new(self.z, tx, ty).expect("tile in range"),
+                layer: feature.layer.clone(),
+                zorder: feature.zorder,
+                id: feature.id,
+                geometry: tile_geometry,
+                attrs: feature.attrs.clone(),
+            }
+        })
+    }
+}
+
+/// Scale, simplify, min-size-filter, and compute the (bounds-clipped) covering
+/// tile rect for one zoom. `None` when the feature contributes nothing at this
+/// zoom (dropped by min-size, or clipped entirely outside the bounds). The
+/// single source of truth for the rect + clip that both render paths share.
+fn prepare_zoom(world: &RenderGeometry, z: u8, options: &RenderOptions) -> Option<PreparedZoom> {
     let n = f64::from(TileCoord::axis_tiles(z));
     let extent = f64::from(options.extent);
     let px = extent / TILE_PIXELS; // tile-extent units per screen pixel
@@ -120,7 +217,7 @@ fn render_at_zoom(
     let mut geometry = scale_geometry(world, n * extent);
     simplify_geometry(&mut geometry, simplify_px * px);
     if !filter_min_size(&mut geometry, min_size_px * px) {
-        return;
+        return None;
     }
 
     let buffer = options.buffer;
@@ -139,43 +236,100 @@ fn render_at_zoom(
         ty0 = ty0.max(by0);
         ty1 = ty1.min(by1);
         if tx0 > tx1 || ty0 > ty1 {
-            return;
+            return None;
         }
     }
 
     let rect = Rect::new(-buffer, -buffer, extent + buffer, extent + buffer);
-    let make = |tx: u32, ty: u32| {
-        clip_to_tile(&geometry, tx, ty, extent, &rect).map(|tile_geometry| RenderedFeature {
-            coord: TileCoord::new(z, tx, ty).expect("tile in range"),
-            layer: feature.layer.clone(),
-            zorder: feature.zorder,
-            id: feature.id,
-            geometry: tile_geometry,
-            attrs: feature.attrs.clone(),
-        })
-    };
+    Some(PreparedZoom {
+        geometry,
+        z,
+        extent,
+        rect,
+        tx0,
+        tx1,
+        ty0,
+        ty1,
+    })
+}
 
-    // A giant feature (admin boundary, coastline) can cover thousands of tiles
-    // at high zoom; clipping them serially leaves one rayon task hogging a core
-    // while the rest idle. Above a threshold, clip across cores (nested rayon
-    // composes with the per-feature parallelism via work stealing). The ordered
-    // collect keeps output identical to the serial loop.
-    const PARALLEL_TILE_THRESHOLD: u64 = 256;
-    let tile_count = u64::from(tx1 - tx0 + 1) * u64::from(ty1 - ty0 + 1);
-    if tile_count >= PARALLEL_TILE_THRESHOLD {
-        let coords: Vec<(u32, u32)> = (tx0..=tx1)
-            .flat_map(|tx| (ty0..=ty1).map(move |ty| (tx, ty)))
-            .collect();
-        out.par_extend(coords.into_par_iter().filter_map(|(tx, ty)| make(tx, ty)));
+/// A giant feature (admin boundary, coastline) can cover thousands of tiles at
+/// high zoom; clipping them serially leaves one rayon task hogging a core while
+/// the rest idle. At or above this covering-tile count, clip across cores
+/// (nested rayon composes with the per-feature parallelism via work stealing).
+/// The ordered collect keeps output identical to the serial loop.
+const PARALLEL_TILE_THRESHOLD: u64 = 256;
+
+fn render_at_zoom(
+    feature: &VectorFeature,
+    world: &RenderGeometry,
+    z: u8,
+    options: &RenderOptions,
+    out: &mut Vec<RenderedFeature>,
+) {
+    let Some(plan) = prepare_zoom(world, z, options) else {
+        return;
+    };
+    if plan.tile_count() >= PARALLEL_TILE_THRESHOLD {
+        let coords = plan.coords();
+        out.par_extend(
+            coords
+                .into_par_iter()
+                .filter_map(|(tx, ty)| plan.piece(feature, tx, ty)),
+        );
     } else {
-        for tx in tx0..=tx1 {
-            for ty in ty0..=ty1 {
-                if let Some(rendered) = make(tx, ty) {
+        for tx in plan.tx0..=plan.tx1 {
+            for ty in plan.ty0..=plan.ty1 {
+                if let Some(rendered) = plan.piece(feature, tx, ty) {
                     out.push(rendered);
                 }
             }
         }
     }
+}
+
+/// Render one feature in bounded **slabs**, invoking `emit` with each slab's
+/// pieces in the exact order [`render_feature`] emits them (zoom ascending,
+/// tx-outer, ty-inner), so feeding each slab to the sort in turn reproduces the
+/// whole feature's feed byte-for-byte. Peak resident output is one slab
+/// (`slab_tiles` covering tiles) regardless of how many tiles the feature
+/// covers — the intra-feature bound the batch chunker cannot give a single
+/// over-budget monster (measured 8.8 GB for one planet feature). Parallel
+/// clipping is kept *within* each slab, so the bound costs resident memory, not
+/// the monster's clip throughput. `emit`'s error type is generic so this stays
+/// free of the pipeline's error type.
+pub fn render_feature_slabbed<E>(
+    feature: &VectorFeature,
+    options: &RenderOptions,
+    slab_tiles: usize,
+    emit: &mut dyn FnMut(Vec<RenderedFeature>) -> Result<(), E>,
+) -> Result<(), E> {
+    let Some(world) = extract(&feature.geometry) else {
+        return Ok(());
+    };
+    let min_z = feature.min_zoom.max(options.min_zoom);
+    let max_z = feature.max_zoom.min(options.max_zoom);
+    let slab_tiles = slab_tiles.max(1);
+    for z in min_z..=max_z {
+        let Some(plan) = prepare_zoom(&world, z, options) else {
+            continue;
+        };
+        // `coords` is the same transient the common parallel path builds; slabs
+        // are its contiguous sub-ranges, so concatenating their (ordered) clips
+        // equals the whole-zoom collect. Empty slabs contribute nothing, exactly
+        // as the common path's `filter_map` drops empty tiles.
+        let coords = plan.coords();
+        for slab in coords.chunks(slab_tiles) {
+            let pieces: Vec<RenderedFeature> = slab
+                .par_iter()
+                .filter_map(|&(tx, ty)| plan.piece(feature, tx, ty))
+                .collect();
+            if !pieces.is_empty() {
+                emit(pieces)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 // --- projection / extraction -------------------------------------------------
@@ -474,7 +628,10 @@ fn bounds_tile_range(bounds: (f64, f64, f64, f64), n: f64, max_tile: u32) -> (u3
 mod tests {
     use std::collections::BTreeMap;
 
-    use geo_types::{Geometry, LineString, Point, Polygon, coord};
+    use geo_types::{
+        Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
+        coord,
+    };
 
     use super::*;
     use crate::geom::world_to_lng_lat;
@@ -629,5 +786,314 @@ mod tests {
             count(&simplified) < count(&plain),
             "simplify reduces vertex count"
         );
+    }
+
+    #[test]
+    fn predicted_pieces_never_under_counts_emitted() {
+        // The predictor is a budget for the render working set, so it must never
+        // under-count what render_feature actually emits — across geometry
+        // kinds, zoom ranges, and the size filters it deliberately ignores.
+        let square: Vec<_> = [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)]
+            .iter()
+            .map(|&(wx, wy)| {
+                let (lng, lat) = ll(wx, wy);
+                coord! {x: lng, y: lat}
+            })
+            .collect();
+        let (pa, pb) = (ll(0.3, 0.3), ll(0.3, 0.25));
+        let lb = ll(0.7, 0.25);
+        let (ta, tb) = (ll(0.5, 0.5), ll(0.5002, 0.5));
+
+        let cases: Vec<(VectorFeature, RenderOptions)> = vec![
+            // Point, single zoom.
+            (
+                feature(Geometry::Point(Point::new(pa.0, pa.1)), 3, 3),
+                opts(0, 14),
+            ),
+            // Polygon covering four z1 tiles.
+            (
+                feature(
+                    Geometry::Polygon(Polygon::new(LineString(square.clone()), vec![])),
+                    1,
+                    1,
+                ),
+                opts(0, 14),
+            ),
+            // Line sliced across a tile boundary.
+            (
+                feature(
+                    Geometry::LineString(LineString(vec![
+                        coord! {x: pb.0, y: pb.1},
+                        coord! {x: lb.0, y: lb.1},
+                    ])),
+                    1,
+                    1,
+                ),
+                opts(0, 14),
+            ),
+            // Wide polygon over a multi-zoom range.
+            (
+                feature(
+                    Geometry::Polygon(Polygon::new(LineString(square), vec![])),
+                    2,
+                    6,
+                ),
+                opts(0, 14),
+            ),
+            // Sub-pixel line with min-size filtering ON — the predictor ignores
+            // the filter, so it must still not under-count the survivors.
+            (
+                feature(
+                    Geometry::LineString(LineString(vec![
+                        coord! {x: ta.0, y: ta.1},
+                        coord! {x: tb.0, y: tb.1},
+                    ])),
+                    0,
+                    14,
+                ),
+                RenderOptions {
+                    min_size_px: 1.0,
+                    ..opts(0, 14)
+                },
+            ),
+        ];
+
+        for (i, (f, options)) in cases.iter().enumerate() {
+            let predicted = predict_pieces(f, options);
+            let actual = render_feature(f, options).len() as u64;
+            assert!(
+                predicted >= actual,
+                "case {i}: predicted {predicted} < actual {actual}"
+            );
+        }
+    }
+
+    /// Deterministic SplitMix64 — a reproducible case stream with no dev-dep.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        /// Uniform in `[0, 1)` with a full 53-bit mantissa.
+        fn unit(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        /// Uniform inclusive integer in `lo..=hi`.
+        fn range(&mut self, lo: u64, hi: u64) -> u64 {
+            lo + self.next_u64() % (hi - lo + 1)
+        }
+
+        fn boolean(&mut self) -> bool {
+            self.next_u64() & 1 == 1
+        }
+    }
+
+    /// A sorted `(a, b)` pair in `0..=max`, so `a <= b` — a valid zoom range.
+    fn sorted_zoom_pair(rng: &mut Rng, max: u8) -> (u8, u8) {
+        let a = rng.range(0, u64::from(max)) as u8;
+        let b = rng.range(0, u64::from(max)) as u8;
+        (a.min(b), a.max(b))
+    }
+
+    /// One random lon/lat vertex inside the world-space window, optionally
+    /// snapped exactly onto a tile edge at the effective max zoom.
+    fn rand_vertex(
+        rng: &mut Rng,
+        wx0: f64,
+        wy0: f64,
+        w: f64,
+        n_eff: f64,
+        snap: bool,
+    ) -> Coord<f64> {
+        let mut wx = wx0 + rng.unit() * w;
+        let mut wy = wy0 + rng.unit() * w;
+        if snap {
+            wx = (wx * n_eff).round() / n_eff;
+            wy = (wy * n_eff).round() / n_eff;
+        }
+        let (lng, lat) = ll(wx, wy);
+        coord! { x: lng, y: lat }
+    }
+
+    /// A random feature + render options with bounded tile coverage (so the
+    /// actual render stays cheap). `snap` places vertices exactly on tile edges.
+    fn random_case(rng: &mut Rng, snap: bool) -> (VectorFeature, RenderOptions) {
+        let (fz0, fz1) = sorted_zoom_pair(rng, 14);
+        let (oz0, oz1) = sorted_zoom_pair(rng, 14);
+        // Size the window to `span` tiles at the effective max zoom; coverage
+        // then shrinks geometrically toward low zooms, keeping the render small.
+        let eff_max = fz1.min(oz1);
+        let span = rng.range(1, 8) as f64;
+        let n_eff = f64::from(1u32 << eff_max);
+        let w = (span / n_eff).min(0.9);
+        let wx0 = rng.unit() * (1.0 - w);
+        let wy0 = rng.unit() * (1.0 - w);
+
+        let v = |rng: &mut Rng| rand_vertex(rng, wx0, wy0, w, n_eff, snap);
+        let vcount = rng.range(3, 9) as usize;
+        let ring = |rng: &mut Rng| -> Vec<Coord<f64>> {
+            (0..vcount)
+                .map(|_| rand_vertex(rng, wx0, wy0, w, n_eff, snap))
+                .collect()
+        };
+        let geometry = match rng.range(0, 5) {
+            0 => Geometry::Point(Point::from(v(rng))),
+            1 => Geometry::MultiPoint(MultiPoint::new(
+                (0..vcount).map(|_| Point::from(v(rng))).collect(),
+            )),
+            2 => Geometry::LineString(LineString(ring(rng))),
+            3 => Geometry::MultiLineString(MultiLineString(vec![
+                LineString(ring(rng)),
+                LineString(ring(rng)),
+            ])),
+            4 => Geometry::Polygon(Polygon::new(LineString(ring(rng)), vec![])),
+            _ => Geometry::MultiPolygon(MultiPolygon(vec![
+                Polygon::new(LineString(ring(rng)), vec![]),
+                Polygon::new(LineString(ring(rng)), vec![]),
+            ])),
+        };
+
+        let options = RenderOptions {
+            min_zoom: oz0,
+            max_zoom: oz1,
+            extent: if rng.boolean() { 4096 } else { 256 },
+            buffer: if rng.boolean() {
+                0.0
+            } else {
+                rng.unit() * 64.0
+            },
+            min_size_px: if rng.boolean() { 0.0 } else { rng.unit() * 4.0 },
+            simplify_tolerance_px: if rng.boolean() { 0.0 } else { rng.unit() * 4.0 },
+            bounds: if rng.boolean() {
+                None
+            } else {
+                let a = v(rng);
+                let b = v(rng);
+                Some((a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y)))
+            },
+        };
+        (feature(geometry, fz0, fz1), options)
+    }
+
+    #[test]
+    fn predict_pieces_over_counts_random_features() {
+        // Fuzz the load-bearing invariant `predict_pieces >= render_feature().len()`
+        // across geometry kinds, zoom ranges, buffers, simplify / min-size, and
+        // bounds clips. The predictor is the memory budget for the render working
+        // set, so a single under-count anywhere would let a monster slip the bound.
+        let mut rng = Rng::new(0xB1A5_0F17_C0FF_EE01);
+        for i in 0..3000 {
+            let (f, options) = random_case(&mut rng, false);
+            let predicted = predict_pieces(&f, &options);
+            let actual = render_feature(&f, &options).len() as u64;
+            assert!(
+                predicted >= actual,
+                "case {i}: predicted {predicted} < actual {actual}\n  {f:?}\n  {options:?}"
+            );
+        }
+        // Adversarial: vertices snapped exactly onto tile edges at the max zoom —
+        // where the pre-fix shortcut arithmetic could floor one tile in and
+        // under-count. The `prepare_zoom`-identical form must survive these.
+        for i in 0..600 {
+            let (f, options) = random_case(&mut rng, true);
+            let predicted = predict_pieces(&f, &options);
+            let actual = render_feature(&f, &options).len() as u64;
+            assert!(
+                predicted >= actual,
+                "boundary case {i}: predicted {predicted} < actual {actual}\n  {f:?}\n  {options:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn predicted_pieces_is_tight_for_solid_coverage() {
+        // A polygon that solidly fills its bbox predicts exactly what it emits
+        // (the four z1 tiles) — the tightness that keeps the common render path
+        // a single chunk once budgeting is layered on top.
+        let ring: Vec<_> = [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)]
+            .iter()
+            .map(|&(wx, wy)| {
+                let (lng, lat) = ll(wx, wy);
+                coord! {x: lng, y: lat}
+            })
+            .collect();
+        let f = feature(
+            Geometry::Polygon(Polygon::new(LineString(ring), vec![])),
+            1,
+            1,
+        );
+        assert_eq!(predict_pieces(&f, &opts(0, 14)), 4);
+        assert_eq!(render_feature(&f, &opts(0, 14)).len(), 4);
+    }
+
+    #[test]
+    fn slabbed_render_matches_whole_and_bounds_slabs() {
+        // Slab-mode must reproduce `render_feature`'s pieces in the identical
+        // order (its byte-identity contract) while holding each emitted slab
+        // within the tile budget (the bound it exists to enforce). A filled
+        // polygon covering a sizeable single-zoom tile rect exercises both.
+        let ring: Vec<_> = [(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)]
+            .iter()
+            .map(|&(wx, wy)| {
+                let (lng, lat) = ll(wx, wy);
+                coord! {x: lng, y: lat}
+            })
+            .collect();
+        let f = feature(
+            Geometry::Polygon(Polygon::new(LineString(ring), vec![])),
+            4,
+            4,
+        );
+        let options = opts(0, 14);
+
+        let whole = render_feature(&f, &options);
+        assert!(
+            whole.len() > 8,
+            "test needs a multi-slab feature, got {} pieces",
+            whole.len()
+        );
+
+        let slab_tiles = 8usize;
+        let mut slabs: Vec<Vec<RenderedFeature>> = Vec::new();
+        render_feature_slabbed(&f, &options, slab_tiles, &mut |slab| {
+            slabs.push(slab);
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+
+        assert!(
+            slabs.len() > 1,
+            "expected multiple slabs, got {}",
+            slabs.len()
+        );
+        for slab in &slabs {
+            assert!(
+                slab.len() <= slab_tiles,
+                "slab of {} pieces exceeds budget {slab_tiles}",
+                slab.len()
+            );
+        }
+
+        // Concatenated slabs == the whole render, piece for piece, in order.
+        let flat: Vec<RenderedFeature> = slabs.into_iter().flatten().collect();
+        assert_eq!(flat.len(), whole.len(), "slab piece count matches whole");
+        for (a, b) in flat.iter().zip(&whole) {
+            assert_eq!(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "slab piece matches whole piece in order"
+            );
+        }
     }
 }

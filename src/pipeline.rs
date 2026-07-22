@@ -24,7 +24,9 @@ use crate::geom::TileCoord;
 use crate::model::{Entry, MAX_LAYER, SortKey, Value};
 use crate::mvt::{self, encode_tile};
 use crate::profile::{FeatureCollector, Profile, VectorFeature};
-use crate::render::{RenderOptions, render_feature};
+use crate::render::{
+    RenderOptions, RenderedFeature, predict_pieces, render_feature, render_feature_slabbed,
+};
 use crate::source::SourceFeature;
 
 /// Generation options (a subset of the eventual CLI surface).
@@ -206,12 +208,107 @@ pub fn generate(
 }
 
 // Render-flush probe thresholds (instrumentation only; see `RenderProbe`). A
-// batch whose summed *input* coords exceed this is warned before the render
-// alloc; a single flush whose *output* exceeds either bound is warned after.
-const PRE_RENDER_COORD_WARN: u64 = 10_000_000;
+// batch containing a feature whose *predicted* output pieces exceed this is
+// warned before the render alloc — naming the monster before it detonates; a
+// single flush whose realized *output* exceeds either bound is warned after.
+const PRE_RENDER_PIECES_WARN: u64 = 100_000;
 const FLUSH_PIECES_WARN: usize = 100_000;
 const FLUSH_BYTES_WARN: usize = 256 << 20;
 const PROBE_RENDER_SUMMARY_SECS: u64 = 30;
+
+/// Cut the render batch into sub-chunks whose summed *predicted* pieces stay
+/// under this, so the resident rendered working set is bounded to ~one sub-chunk
+/// rather than a whole 4096-feature batch — the H-A fix, where a cluster of
+/// monster multipolygons in one batch rendered concurrently into a multi-GB
+/// `Vec` and walled the run. At the tag-heavy monster rate (~7.7 KB/piece,
+/// measured on the planet) this caps a sub-chunk near 256 MB; normal batches
+/// predict far below it (great-britain averaged ~4k pieces/flush), so they stay
+/// a single chunk — today's exact full-batch code path, unchanged. A single
+/// feature predicted over budget still renders whole (its own sub-chunk);
+/// bounding that intra-feature term is slab-mode's job, a separate step.
+const RENDER_CHUNK_PIECES: u64 = 32_768;
+
+/// Slab budget for mechanism 3: a single feature predicted over
+/// [`RENDER_CHUNK_PIECES`] — so isolated by [`chunk_ranges`] as its own singleton
+/// chunk — renders in slabs of at most this many covering tiles, feeding the sort
+/// per slab so its resident output stays ~one slab instead of its whole piece set
+/// (measured 8.8 GB for one planet feature). Equal to the chunk budget:
+/// [`predict_pieces`] sums tile-rect areas, so predicted pieces and covering tiles
+/// share a unit and the two mechanisms compose — exactly the features chunk_ranges
+/// isolates are the ones that slab.
+const RENDER_SLAB_TILES: usize = RENDER_CHUNK_PIECES as usize;
+
+/// A batch's input geometry characterized *before* the par-render, so a monster
+/// is named in the log ahead of the allocation storm it triggers. `predicted`
+/// pieces (summed covered-tile area, [`predict_pieces`]) is the size driver —
+/// the falsified probe showed multi-GB flushes from modest-*coord* ocean/ice
+/// polygons whose input-coord warning never fired — while input coords are kept
+/// only as a cross-reference against the relation-assembly log.
+struct BatchProfile {
+    features: usize,
+    total_input_coords: u64,
+    largest_input_id: u64,
+    largest_input_coords: usize,
+    total_predicted_pieces: u64,
+    max_predicted_id: u64,
+    max_predicted_pieces: u64,
+}
+
+/// Characterize a (sub-)chunk before rendering: summed/peak input coords (for
+/// cross-reference) and summed/peak predicted output pieces (the size driver),
+/// the latter read from the pre-computed `predicted` slice. `chunk` and
+/// `predicted` are parallel and equal length. One pass, negligible beside the
+/// render it precedes.
+fn profile_batch(chunk: &[VectorFeature], predicted: &[u64]) -> BatchProfile {
+    let mut profile = BatchProfile {
+        features: chunk.len(),
+        total_input_coords: 0,
+        largest_input_id: 0,
+        largest_input_coords: 0,
+        total_predicted_pieces: 0,
+        max_predicted_id: 0,
+        max_predicted_pieces: 0,
+    };
+    for (feature, &predicted) in chunk.iter().zip(predicted) {
+        let coords = feature.geometry.coords_count();
+        profile.total_input_coords += coords as u64;
+        if coords > profile.largest_input_coords {
+            profile.largest_input_coords = coords;
+            profile.largest_input_id = feature.id;
+        }
+        profile.total_predicted_pieces += predicted;
+        if predicted > profile.max_predicted_pieces {
+            profile.max_predicted_pieces = predicted;
+            profile.max_predicted_id = feature.id;
+        }
+    }
+    profile
+}
+
+/// Partition per-feature `predicted` piece counts (in batch order) into
+/// contiguous index ranges whose summed prediction stays under `budget`. A
+/// feature whose own prediction alone would overflow the budget forms a
+/// singleton range (it cannot be split without slab-mode). The ranges cover
+/// `0..predicted.len()` in order with no gaps or overlaps, so rendering them in
+/// sequence and feeding each to the sort reproduces the exact whole-batch feed
+/// order — the property that makes chunking byte-identical to a single collect.
+fn chunk_ranges(predicted: &[u64], budget: u64) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut acc = 0u64;
+    for (i, &p) in predicted.iter().enumerate() {
+        if i > start && acc.saturating_add(p) > budget {
+            ranges.push(start..i);
+            start = i;
+            acc = 0;
+        }
+        acc = acc.saturating_add(p);
+    }
+    if start < predicted.len() {
+        ranges.push(start..predicted.len());
+    }
+    ranges
+}
 
 /// H-A render-flush instrumentation. Accumulates the per-flush rendered-output
 /// size distribution so a long run leaves a trajectory in the log instead of
@@ -223,9 +320,12 @@ struct RenderProbe {
     flushes: u64,
     total_pieces: u64,
     total_bytes: u64,
+    total_predicted_pieces: u64,
     max_flush_pieces: usize,
     max_flush_bytes: usize,
     max_flush_input_id: u64,
+    max_flush_predicted_pieces: u64,
+    max_flush_predicted_id: u64,
     last_summary: std::time::Instant,
 }
 
@@ -235,31 +335,45 @@ impl RenderProbe {
             flushes: 0,
             total_pieces: 0,
             total_bytes: 0,
+            total_predicted_pieces: 0,
             max_flush_pieces: 0,
             max_flush_bytes: 0,
             max_flush_input_id: 0,
+            max_flush_predicted_pieces: 0,
+            max_flush_predicted_id: 0,
             last_summary: std::time::Instant::now(),
         }
     }
 
-    /// Record one flush's rendered output and emit a throttled running summary.
-    /// `largest_input_id` is the id of the batch's biggest input feature — the
-    /// prime suspect when a flush explodes.
-    fn record(&mut self, pieces: usize, bytes: usize, largest_input_id: u64) {
+    /// Record one flush's rendered output against the pre-render `profile` and
+    /// emit a throttled running summary. Logging `predicted` beside the realized
+    /// pieces is the fidelity receipt: a predicted/actual ratio near 1 means the
+    /// budget the fix will chunk on is tight enough to leave the common path a
+    /// single chunk; a large ratio means the predictor over-fires and the fix
+    /// design needs revisiting — measured before any bounding code is written.
+    fn record(&mut self, profile: &BatchProfile, pieces: usize, bytes: usize) {
         self.flushes += 1;
         self.total_pieces += pieces as u64;
         self.total_bytes += bytes as u64;
+        self.total_predicted_pieces += profile.total_predicted_pieces;
         if bytes > self.max_flush_bytes {
             self.max_flush_bytes = bytes;
             self.max_flush_pieces = pieces;
-            self.max_flush_input_id = largest_input_id;
+            self.max_flush_input_id = profile.largest_input_id;
+            self.max_flush_predicted_pieces = profile.max_predicted_pieces;
+            self.max_flush_predicted_id = profile.max_predicted_id;
         }
-        // A single oversized flush is the H-A signature; log it as it happens.
+        // A single oversized flush is the H-A signature; log it as it happens,
+        // naming the predicted *output* monster (predicted_id, the feature the
+        // pre-render warning flagged) beside the realized size — not just the
+        // largest-input feature, which the probe proved is the wrong suspect.
         if pieces > FLUSH_PIECES_WARN || bytes > FLUSH_BYTES_WARN {
             tracing::warn!(
                 pieces,
                 bytes,
-                largest_input_id,
+                predicted_pieces = profile.max_predicted_pieces,
+                predicted_id = profile.max_predicted_id,
+                largest_input_id = profile.largest_input_id,
                 "render flush: large rendered working set"
             );
         }
@@ -275,9 +389,12 @@ impl RenderProbe {
             flushes = self.flushes,
             total_pieces = self.total_pieces,
             total_bytes = self.total_bytes,
+            total_predicted_pieces = self.total_predicted_pieces,
             max_flush_pieces = self.max_flush_pieces,
             max_flush_bytes = self.max_flush_bytes,
             max_flush_input_id = self.max_flush_input_id,
+            max_flush_predicted_pieces = self.max_flush_predicted_pieces,
+            max_flush_predicted_id = self.max_flush_predicted_id,
             "render probe summary"
         );
     }
@@ -295,32 +412,114 @@ fn flush_render_batch(
     if batch.is_empty() {
         return Ok(());
     }
-    // Probe: characterize the batch's input geometry *before* the par-render.
-    // A batch whose summed input coords are huge is the H-A death signature —
-    // the render below can expand one monster multipolygon into a multi-GB
-    // `rendered` Vec across every rayon worker. Logging it before the alloc
-    // means "this line, then silence" localizes the wall to this site.
-    let mut total_input_coords: u64 = 0;
-    let mut largest_input_id = 0u64;
-    let mut largest_input_coords = 0usize;
-    for feature in batch.iter() {
-        let coords = feature.geometry.coords_count();
-        total_input_coords += coords as u64;
-        if coords > largest_input_coords {
-            largest_input_coords = coords;
-            largest_input_id = feature.id;
-        }
+    // Predict each feature's rendered pieces once (an over-estimate of what the
+    // render emits), then cut the batch into predicted-bounded sub-chunks and
+    // render each in turn so the resident `rendered` Vec never spans the whole
+    // batch. Sub-chunks are contiguous and in order and each collect preserves
+    // order, so the concatenated sort-feed is byte-for-byte identical to a
+    // single whole-batch collect.
+    let predicted: Vec<u64> = batch
+        .iter()
+        .map(|feature| predict_pieces(feature, render_options))
+        .collect();
+    for range in chunk_ranges(&predicted, RENDER_CHUNK_PIECES) {
+        render_chunk(
+            &batch[range.clone()],
+            &predicted[range],
+            render_options,
+            registry,
+            sort,
+            probe,
+        )?;
     }
-    if total_input_coords > PRE_RENDER_COORD_WARN {
+    batch.clear();
+    Ok(())
+}
+
+/// Render one sub-chunk of a batch and feed it to the sort in order. Isolated so
+/// its `rendered` Vec is freed before the next sub-chunk starts, which is what
+/// bounds peak render memory to one sub-chunk's worth.
+fn render_chunk(
+    chunk: &[VectorFeature],
+    predicted: &[u64],
+    render_options: &RenderOptions,
+    registry: &mut LayerRegistry,
+    sort: &mut ExternalMergeSort,
+    probe: &mut RenderProbe,
+) -> Result<()> {
+    // Probe: characterize the chunk *before* the par-render. A feature whose
+    // predicted output pieces are huge is the H-A death signature — the render
+    // below expands it into a multi-GB `rendered` Vec across every rayon
+    // worker. Logging it before the alloc means "this line, then silence"
+    // localizes the wall to this site and names the offending feature id.
+    let profile = profile_batch(chunk, predicted);
+    if profile.max_predicted_pieces > PRE_RENDER_PIECES_WARN {
         tracing::warn!(
-            features = batch.len(),
-            total_input_coords,
-            largest_input_id,
-            largest_input_coords,
-            "render batch: large input about to expand"
+            features = profile.features,
+            max_predicted_id = profile.max_predicted_id,
+            max_predicted_pieces = profile.max_predicted_pieces,
+            total_predicted_pieces = profile.total_predicted_pieces,
+            largest_input_id = profile.largest_input_id,
+            largest_input_coords = profile.largest_input_coords,
+            total_input_coords = profile.total_input_coords,
+            "render batch: feature predicted to expand into a huge tile-piece set"
         );
     }
-    let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = batch
+
+    // Slab-mode (mechanism 3): a lone feature predicted over the chunk budget was
+    // isolated by `chunk_ranges` as this singleton, but the whole-chunk collect
+    // below would still materialize its entire piece set in one `Vec` (measured
+    // 8.8 GB for planet feature 656343). Render it in bounded slabs instead,
+    // feeding the sort per slab, so resident output never exceeds one slab.
+    // Byte-identical: `render_feature_slabbed` emits the exact tile order
+    // `render_feature` would, in contiguous slabs; each slab's blobs are encoded
+    // order-preserving and `sort.add`-ed in sequence, so the fed entry stream is
+    // unchanged from the whole-feature collect.
+    if chunk.len() == 1 && predicted[0] > RENDER_CHUNK_PIECES {
+        let feature = &chunk[0];
+        render_feature_slabbed(
+            feature,
+            render_options,
+            RENDER_SLAB_TILES,
+            &mut |slab: Vec<RenderedFeature>| -> Result<()> {
+                // Encode this slab's blobs in parallel (as the common path does),
+                // then feed the sort serially in order.
+                let encoded: Vec<(TileCoord, String, i32, Vec<u8>)> = slab
+                    .into_par_iter()
+                    .map(|r| {
+                        let blob = encode_blob(&FeatureBlob {
+                            id: r.id,
+                            geometry: r.geometry,
+                            attrs: r.attrs,
+                        })
+                        .expect("feature blob encode is infallible for rendered features");
+                        (r.coord, r.layer, r.zorder, blob)
+                    })
+                    .collect();
+                let pieces = encoded.len();
+                let bytes: usize = encoded
+                    .iter()
+                    .map(|(_, layer, _, blob)| blob.len() + layer.len())
+                    .sum();
+                for (coord, layer_name, zorder, blob) in encoded {
+                    let layer = registry.intern(&layer_name)?;
+                    sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
+                }
+                // Record each slab as its OWN flush: resident output is one slab,
+                // and the probe must reflect that bound rather than the
+                // accumulated whole-feature total — which would report planet
+                // feature 656343 as an 8.8 GB flush and hide slab-mode entirely.
+                // (The `profile` carried is the whole feature's, so a slab flush's
+                // predicted pieces name the monster while its realized pieces show
+                // the slab bound — a deliberate, documented attribution.)
+                probe.record(&profile, pieces, bytes);
+                Ok(())
+            },
+        )?;
+        return Ok(());
+    }
+
+    let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = chunk
         .par_iter()
         .flat_map_iter(|feature| {
             render_feature(feature, render_options)
@@ -344,12 +543,11 @@ fn flush_render_batch(
         .iter()
         .map(|(_, layer, _, blob)| blob.len() + layer.len())
         .sum();
-    probe.record(pieces, bytes, largest_input_id);
+    probe.record(&profile, pieces, bytes);
     for (coord, layer_name, zorder, blob) in rendered {
         let layer = registry.intern(&layer_name)?;
         sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
     }
-    batch.clear();
     Ok(())
 }
 
@@ -445,8 +643,16 @@ impl WriteProbe {
     /// Throttled progress line (every `WRITE_LOG_ENTRIES` entries or
     /// `PROBE_WRITE_SECS`), including the current tile's live working set.
     fn maybe_log(&mut self, current: &RawTile) {
+        // Consult the wall clock only on a coarse entry stride. At planet scale
+        // the merge thread pulls billions of entries and the count condition is
+        // almost always true, so an unmasked `Instant::elapsed()` per entry is
+        // tens of seconds of pure syscall on the serial path. Short-circuiting
+        // on the stride keeps the clock call to ~once per 64Ki entries; this is
+        // logging-only, so nothing grouped, sent, or written changes.
+        const CLOCK_STRIDE: u64 = 1 << 16;
         if self.entries_consumed - self.last_log_entries < WRITE_LOG_ENTRIES
-            && self.last_log.elapsed().as_secs() < PROBE_WRITE_SECS
+            && (!self.entries_consumed.is_multiple_of(CLOCK_STRIDE)
+                || self.last_log.elapsed().as_secs() < PROBE_WRITE_SECS)
         {
             return;
         }
@@ -1127,5 +1333,41 @@ mod tests {
             }
             other => panic!("expected lines, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chunk_ranges_partition_in_order_under_budget() {
+        // Empty input yields no ranges.
+        assert!(chunk_ranges(&[], 10).is_empty());
+
+        // Everything under budget stays a single chunk — the common path that
+        // must remain today's exact full-batch collect.
+        assert_eq!(chunk_ranges(&[1, 2, 3, 4], 100), vec![0..4]);
+
+        // A single over-budget feature is its own chunk; neighbours split off it.
+        assert_eq!(chunk_ranges(&[3, 100, 3], 10), vec![0..1, 1..2, 2..3]);
+
+        // Greedy fill: accumulate until the next feature would overflow.
+        assert_eq!(chunk_ranges(&[4, 4, 4], 10), vec![0..2, 2..3]);
+        assert_eq!(chunk_ranges(&[6, 6, 6], 10), vec![0..1, 1..2, 2..3]);
+
+        // Coverage + ordering invariant over a mixed sequence: ranges tile
+        // 0..n contiguously with no gaps or overlaps, and any range summing over
+        // budget is a single feature (unsplittable without slab-mode).
+        let predicted = [5u64, 5, 1, 50, 2, 3, 40, 40, 1];
+        let budget = 10;
+        let ranges = chunk_ranges(&predicted, budget);
+        let mut next = 0;
+        for r in &ranges {
+            assert_eq!(r.start, next, "no gap or overlap");
+            assert!(r.start < r.end, "non-empty range");
+            let sum: u64 = predicted[r.clone()].iter().sum();
+            assert!(
+                sum <= budget || r.len() == 1,
+                "range {r:?} sums {sum} over budget {budget} but is not a singleton"
+            );
+            next = r.end;
+        }
+        assert_eq!(next, predicted.len(), "ranges cover the whole batch");
     }
 }
