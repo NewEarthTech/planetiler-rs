@@ -109,6 +109,13 @@ pub fn render_feature(feature: &VectorFeature, options: &RenderOptions) -> Vec<R
 /// render_feature(..).len()` always holds, making it a safe budget for the
 /// render working set. Cost is one bounding-box reduction plus O(zooms)
 /// arithmetic, independent of the (possibly enormous) tile count.
+///
+/// The tile-rect arithmetic is deliberately identical to [`prepare_zoom`]'s
+/// (`scale = n * extent`, then `(scaled ± buffer) / extent`): on an unsimplified
+/// feature the predicted rect is then bit-for-bit the rect the render derives,
+/// not a differently-rounded approximation, so the over-count invariant survives
+/// even a coordinate landing exactly on a tile boundary — where a shortcut form
+/// (`world * n ± buffer/extent`) could round one tile in and under-count.
 pub fn predict_pieces(feature: &VectorFeature, options: &RenderOptions) -> u64 {
     let Some(rect) = feature.geometry.bounding_rect() else {
         return 0;
@@ -123,17 +130,20 @@ pub fn predict_pieces(feature: &VectorFeature, options: &RenderOptions) -> u64 {
     let min_z = feature.min_zoom.max(options.min_zoom);
     let max_z = feature.max_zoom.min(options.max_zoom);
     let extent = f64::from(options.extent);
-    // `render_at_zoom` derives tile indices as (scaled_coord ± buffer) / extent
-    // where scaled_coord = world * n * extent, i.e. world * n ± buffer/extent.
-    let buffer_tiles = options.buffer / extent;
+    let buffer = options.buffer;
     let mut total: u64 = 0;
     for z in min_z..=max_z {
         let n = f64::from(TileCoord::axis_tiles(z));
         let max_tile = TileCoord::axis_tiles(z) - 1;
-        let tx0 = clamp_tile(min_wx * n - buffer_tiles, max_tile);
-        let tx1 = clamp_tile(max_wx * n + buffer_tiles, max_tile);
-        let ty0 = clamp_tile(min_wy * n - buffer_tiles, max_tile);
-        let ty1 = clamp_tile(max_wy * n + buffer_tiles, max_tile);
+        // Match `prepare_zoom` exactly: scale the world bbox by `n * extent`,
+        // then take `(scaled ± buffer) / extent`. This form is monotonic in the
+        // bbox and bit-identical to the render's rect, so simplify / min-size /
+        // bounds (all of which only shrink the bbox) keep `predicted >= emitted`.
+        let scale = n * extent;
+        let tx0 = clamp_tile((min_wx * scale - buffer) / extent, max_tile);
+        let tx1 = clamp_tile((max_wx * scale + buffer) / extent, max_tile);
+        let ty0 = clamp_tile((min_wy * scale - buffer) / extent, max_tile);
+        let ty1 = clamp_tile((max_wy * scale + buffer) / extent, max_tile);
         total += u64::from(tx1 - tx0 + 1) * u64::from(ty1 - ty0 + 1);
     }
     total
@@ -618,7 +628,10 @@ fn bounds_tile_range(bounds: (f64, f64, f64, f64), n: f64, max_tile: u32) -> (u3
 mod tests {
     use std::collections::BTreeMap;
 
-    use geo_types::{Geometry, LineString, Point, Polygon, coord};
+    use geo_types::{
+        Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
+        coord,
+    };
 
     use super::*;
     use crate::geom::world_to_lng_lat;
@@ -851,6 +864,154 @@ mod tests {
             assert!(
                 predicted >= actual,
                 "case {i}: predicted {predicted} < actual {actual}"
+            );
+        }
+    }
+
+    /// Deterministic SplitMix64 — a reproducible case stream with no dev-dep.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Rng(seed)
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        /// Uniform in `[0, 1)` with a full 53-bit mantissa.
+        fn unit(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+
+        /// Uniform inclusive integer in `lo..=hi`.
+        fn range(&mut self, lo: u64, hi: u64) -> u64 {
+            lo + self.next_u64() % (hi - lo + 1)
+        }
+
+        fn boolean(&mut self) -> bool {
+            self.next_u64() & 1 == 1
+        }
+    }
+
+    /// A sorted `(a, b)` pair in `0..=max`, so `a <= b` — a valid zoom range.
+    fn sorted_zoom_pair(rng: &mut Rng, max: u8) -> (u8, u8) {
+        let a = rng.range(0, u64::from(max)) as u8;
+        let b = rng.range(0, u64::from(max)) as u8;
+        (a.min(b), a.max(b))
+    }
+
+    /// One random lon/lat vertex inside the world-space window, optionally
+    /// snapped exactly onto a tile edge at the effective max zoom.
+    fn rand_vertex(
+        rng: &mut Rng,
+        wx0: f64,
+        wy0: f64,
+        w: f64,
+        n_eff: f64,
+        snap: bool,
+    ) -> Coord<f64> {
+        let mut wx = wx0 + rng.unit() * w;
+        let mut wy = wy0 + rng.unit() * w;
+        if snap {
+            wx = (wx * n_eff).round() / n_eff;
+            wy = (wy * n_eff).round() / n_eff;
+        }
+        let (lng, lat) = ll(wx, wy);
+        coord! { x: lng, y: lat }
+    }
+
+    /// A random feature + render options with bounded tile coverage (so the
+    /// actual render stays cheap). `snap` places vertices exactly on tile edges.
+    fn random_case(rng: &mut Rng, snap: bool) -> (VectorFeature, RenderOptions) {
+        let (fz0, fz1) = sorted_zoom_pair(rng, 14);
+        let (oz0, oz1) = sorted_zoom_pair(rng, 14);
+        // Size the window to `span` tiles at the effective max zoom; coverage
+        // then shrinks geometrically toward low zooms, keeping the render small.
+        let eff_max = fz1.min(oz1);
+        let span = rng.range(1, 8) as f64;
+        let n_eff = f64::from(1u32 << eff_max);
+        let w = (span / n_eff).min(0.9);
+        let wx0 = rng.unit() * (1.0 - w);
+        let wy0 = rng.unit() * (1.0 - w);
+
+        let v = |rng: &mut Rng| rand_vertex(rng, wx0, wy0, w, n_eff, snap);
+        let vcount = rng.range(3, 9) as usize;
+        let ring = |rng: &mut Rng| -> Vec<Coord<f64>> {
+            (0..vcount)
+                .map(|_| rand_vertex(rng, wx0, wy0, w, n_eff, snap))
+                .collect()
+        };
+        let geometry = match rng.range(0, 5) {
+            0 => Geometry::Point(Point::from(v(rng))),
+            1 => Geometry::MultiPoint(MultiPoint::new(
+                (0..vcount).map(|_| Point::from(v(rng))).collect(),
+            )),
+            2 => Geometry::LineString(LineString(ring(rng))),
+            3 => Geometry::MultiLineString(MultiLineString(vec![
+                LineString(ring(rng)),
+                LineString(ring(rng)),
+            ])),
+            4 => Geometry::Polygon(Polygon::new(LineString(ring(rng)), vec![])),
+            _ => Geometry::MultiPolygon(MultiPolygon(vec![
+                Polygon::new(LineString(ring(rng)), vec![]),
+                Polygon::new(LineString(ring(rng)), vec![]),
+            ])),
+        };
+
+        let options = RenderOptions {
+            min_zoom: oz0,
+            max_zoom: oz1,
+            extent: if rng.boolean() { 4096 } else { 256 },
+            buffer: if rng.boolean() {
+                0.0
+            } else {
+                rng.unit() * 64.0
+            },
+            min_size_px: if rng.boolean() { 0.0 } else { rng.unit() * 4.0 },
+            simplify_tolerance_px: if rng.boolean() { 0.0 } else { rng.unit() * 4.0 },
+            bounds: if rng.boolean() {
+                None
+            } else {
+                let a = v(rng);
+                let b = v(rng);
+                Some((a.x.min(b.x), a.y.min(b.y), a.x.max(b.x), a.y.max(b.y)))
+            },
+        };
+        (feature(geometry, fz0, fz1), options)
+    }
+
+    #[test]
+    fn predict_pieces_over_counts_random_features() {
+        // Fuzz the load-bearing invariant `predict_pieces >= render_feature().len()`
+        // across geometry kinds, zoom ranges, buffers, simplify / min-size, and
+        // bounds clips. The predictor is the memory budget for the render working
+        // set, so a single under-count anywhere would let a monster slip the bound.
+        let mut rng = Rng::new(0xB1A5_0F17_C0FF_EE01);
+        for i in 0..3000 {
+            let (f, options) = random_case(&mut rng, false);
+            let predicted = predict_pieces(&f, &options);
+            let actual = render_feature(&f, &options).len() as u64;
+            assert!(
+                predicted >= actual,
+                "case {i}: predicted {predicted} < actual {actual}\n  {f:?}\n  {options:?}"
+            );
+        }
+        // Adversarial: vertices snapped exactly onto tile edges at the max zoom —
+        // where the pre-fix shortcut arithmetic could floor one tile in and
+        // under-count. The `prepare_zoom`-identical form must survive these.
+        for i in 0..600 {
+            let (f, options) = random_case(&mut rng, true);
+            let predicted = predict_pieces(&f, &options);
+            let actual = render_feature(&f, &options).len() as u64;
+            assert!(
+                predicted >= actual,
+                "boundary case {i}: predicted {predicted} < actual {actual}\n  {f:?}\n  {options:?}"
             );
         }
     }
