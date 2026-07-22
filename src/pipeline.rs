@@ -24,7 +24,9 @@ use crate::geom::TileCoord;
 use crate::model::{Entry, MAX_LAYER, SortKey, Value};
 use crate::mvt::{self, encode_tile};
 use crate::profile::{FeatureCollector, Profile, VectorFeature};
-use crate::render::{RenderOptions, predict_pieces, render_feature};
+use crate::render::{
+    RenderOptions, RenderedFeature, predict_pieces, render_feature, render_feature_slabbed,
+};
 use crate::source::SourceFeature;
 
 /// Generation options (a subset of the eventual CLI surface).
@@ -225,6 +227,16 @@ const PROBE_RENDER_SUMMARY_SECS: u64 = 30;
 /// feature predicted over budget still renders whole (its own sub-chunk);
 /// bounding that intra-feature term is slab-mode's job, a separate step.
 const RENDER_CHUNK_PIECES: u64 = 32_768;
+
+/// Slab budget for mechanism 3: a single feature predicted over
+/// [`RENDER_CHUNK_PIECES`] — so isolated by [`chunk_ranges`] as its own singleton
+/// chunk — renders in slabs of at most this many covering tiles, feeding the sort
+/// per slab so its resident output stays ~one slab instead of its whole piece set
+/// (measured 8.8 GB for one planet feature). Equal to the chunk budget:
+/// [`predict_pieces`] sums tile-rect areas, so predicted pieces and covering tiles
+/// share a unit and the two mechanisms compose — exactly the features chunk_ranges
+/// isolates are the ones that slab.
+const RENDER_SLAB_TILES: usize = RENDER_CHUNK_PIECES as usize;
 
 /// A batch's input geometry characterized *before* the par-render, so a monster
 /// is named in the log ahead of the allocation storm it triggers. `predicted`
@@ -453,6 +465,60 @@ fn render_chunk(
             "render batch: feature predicted to expand into a huge tile-piece set"
         );
     }
+
+    // Slab-mode (mechanism 3): a lone feature predicted over the chunk budget was
+    // isolated by `chunk_ranges` as this singleton, but the whole-chunk collect
+    // below would still materialize its entire piece set in one `Vec` (measured
+    // 8.8 GB for planet feature 656343). Render it in bounded slabs instead,
+    // feeding the sort per slab, so resident output never exceeds one slab.
+    // Byte-identical: `render_feature_slabbed` emits the exact tile order
+    // `render_feature` would, in contiguous slabs; each slab's blobs are encoded
+    // order-preserving and `sort.add`-ed in sequence, so the fed entry stream is
+    // unchanged from the whole-feature collect.
+    if chunk.len() == 1 && predicted[0] > RENDER_CHUNK_PIECES {
+        let feature = &chunk[0];
+        render_feature_slabbed(
+            feature,
+            render_options,
+            RENDER_SLAB_TILES,
+            &mut |slab: Vec<RenderedFeature>| -> Result<()> {
+                // Encode this slab's blobs in parallel (as the common path does),
+                // then feed the sort serially in order.
+                let encoded: Vec<(TileCoord, String, i32, Vec<u8>)> = slab
+                    .into_par_iter()
+                    .map(|r| {
+                        let blob = encode_blob(&FeatureBlob {
+                            id: r.id,
+                            geometry: r.geometry,
+                            attrs: r.attrs,
+                        })
+                        .expect("feature blob encode is infallible for rendered features");
+                        (r.coord, r.layer, r.zorder, blob)
+                    })
+                    .collect();
+                let pieces = encoded.len();
+                let bytes: usize = encoded
+                    .iter()
+                    .map(|(_, layer, _, blob)| blob.len() + layer.len())
+                    .sum();
+                for (coord, layer_name, zorder, blob) in encoded {
+                    let layer = registry.intern(&layer_name)?;
+                    sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
+                }
+                // Record each slab as its OWN flush: resident output is one slab,
+                // and the probe must reflect that bound rather than the
+                // accumulated whole-feature total — which would report planet
+                // feature 656343 as an 8.8 GB flush and hide slab-mode entirely.
+                // (The `profile` carried is the whole feature's, so a slab flush's
+                // predicted pieces name the monster while its realized pieces show
+                // the slab bound — a deliberate, documented attribution.)
+                probe.record(&profile, pieces, bytes);
+                Ok(())
+            },
+        )?;
+        return Ok(());
+    }
+
     let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = chunk
         .par_iter()
         .flat_map_iter(|feature| {

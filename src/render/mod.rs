@@ -139,13 +139,56 @@ pub fn predict_pieces(feature: &VectorFeature, options: &RenderOptions) -> u64 {
     total
 }
 
-fn render_at_zoom(
-    feature: &VectorFeature,
-    world: &RenderGeometry,
+/// Prepared per-zoom render state shared by the common path ([`render_at_zoom`])
+/// and slab-mode ([`render_feature_slabbed`]): the scaled + simplified geometry,
+/// the covering tile rect (already clipped to `options.bounds`), and the clip
+/// rectangle. Both paths derive their tiles from this one struct, so they emit
+/// byte-identical pieces in the identical order.
+struct PreparedZoom {
+    geometry: RenderGeometry,
     z: u8,
-    options: &RenderOptions,
-    out: &mut Vec<RenderedFeature>,
-) {
+    extent: f64,
+    rect: Rect,
+    tx0: u32,
+    tx1: u32,
+    ty0: u32,
+    ty1: u32,
+}
+
+impl PreparedZoom {
+    /// Covering-tile count — drives the parallel-clip decision and the slab budget.
+    fn tile_count(&self) -> u64 {
+        u64::from(self.tx1 - self.tx0 + 1) * u64::from(self.ty1 - self.ty0 + 1)
+    }
+
+    /// The covering tiles in **tx-outer, ty-inner** order — the exact emission
+    /// order both the common parallel path and slab-mode preserve.
+    fn coords(&self) -> Vec<(u32, u32)> {
+        (self.tx0..=self.tx1)
+            .flat_map(|tx| (self.ty0..=self.ty1).map(move |ty| (tx, ty)))
+            .collect()
+    }
+
+    /// Clip the prepared geometry into one tile, or `None` if nothing lands.
+    fn piece(&self, feature: &VectorFeature, tx: u32, ty: u32) -> Option<RenderedFeature> {
+        clip_to_tile(&self.geometry, tx, ty, self.extent, &self.rect).map(|tile_geometry| {
+            RenderedFeature {
+                coord: TileCoord::new(self.z, tx, ty).expect("tile in range"),
+                layer: feature.layer.clone(),
+                zorder: feature.zorder,
+                id: feature.id,
+                geometry: tile_geometry,
+                attrs: feature.attrs.clone(),
+            }
+        })
+    }
+}
+
+/// Scale, simplify, min-size-filter, and compute the (bounds-clipped) covering
+/// tile rect for one zoom. `None` when the feature contributes nothing at this
+/// zoom (dropped by min-size, or clipped entirely outside the bounds). The
+/// single source of truth for the rect + clip that both render paths share.
+fn prepare_zoom(world: &RenderGeometry, z: u8, options: &RenderOptions) -> Option<PreparedZoom> {
     let n = f64::from(TileCoord::axis_tiles(z));
     let extent = f64::from(options.extent);
     let px = extent / TILE_PIXELS; // tile-extent units per screen pixel
@@ -164,7 +207,7 @@ fn render_at_zoom(
     let mut geometry = scale_geometry(world, n * extent);
     simplify_geometry(&mut geometry, simplify_px * px);
     if !filter_min_size(&mut geometry, min_size_px * px) {
-        return;
+        return None;
     }
 
     let buffer = options.buffer;
@@ -183,43 +226,100 @@ fn render_at_zoom(
         ty0 = ty0.max(by0);
         ty1 = ty1.min(by1);
         if tx0 > tx1 || ty0 > ty1 {
-            return;
+            return None;
         }
     }
 
     let rect = Rect::new(-buffer, -buffer, extent + buffer, extent + buffer);
-    let make = |tx: u32, ty: u32| {
-        clip_to_tile(&geometry, tx, ty, extent, &rect).map(|tile_geometry| RenderedFeature {
-            coord: TileCoord::new(z, tx, ty).expect("tile in range"),
-            layer: feature.layer.clone(),
-            zorder: feature.zorder,
-            id: feature.id,
-            geometry: tile_geometry,
-            attrs: feature.attrs.clone(),
-        })
-    };
+    Some(PreparedZoom {
+        geometry,
+        z,
+        extent,
+        rect,
+        tx0,
+        tx1,
+        ty0,
+        ty1,
+    })
+}
 
-    // A giant feature (admin boundary, coastline) can cover thousands of tiles
-    // at high zoom; clipping them serially leaves one rayon task hogging a core
-    // while the rest idle. Above a threshold, clip across cores (nested rayon
-    // composes with the per-feature parallelism via work stealing). The ordered
-    // collect keeps output identical to the serial loop.
-    const PARALLEL_TILE_THRESHOLD: u64 = 256;
-    let tile_count = u64::from(tx1 - tx0 + 1) * u64::from(ty1 - ty0 + 1);
-    if tile_count >= PARALLEL_TILE_THRESHOLD {
-        let coords: Vec<(u32, u32)> = (tx0..=tx1)
-            .flat_map(|tx| (ty0..=ty1).map(move |ty| (tx, ty)))
-            .collect();
-        out.par_extend(coords.into_par_iter().filter_map(|(tx, ty)| make(tx, ty)));
+/// A giant feature (admin boundary, coastline) can cover thousands of tiles at
+/// high zoom; clipping them serially leaves one rayon task hogging a core while
+/// the rest idle. At or above this covering-tile count, clip across cores
+/// (nested rayon composes with the per-feature parallelism via work stealing).
+/// The ordered collect keeps output identical to the serial loop.
+const PARALLEL_TILE_THRESHOLD: u64 = 256;
+
+fn render_at_zoom(
+    feature: &VectorFeature,
+    world: &RenderGeometry,
+    z: u8,
+    options: &RenderOptions,
+    out: &mut Vec<RenderedFeature>,
+) {
+    let Some(plan) = prepare_zoom(world, z, options) else {
+        return;
+    };
+    if plan.tile_count() >= PARALLEL_TILE_THRESHOLD {
+        let coords = plan.coords();
+        out.par_extend(
+            coords
+                .into_par_iter()
+                .filter_map(|(tx, ty)| plan.piece(feature, tx, ty)),
+        );
     } else {
-        for tx in tx0..=tx1 {
-            for ty in ty0..=ty1 {
-                if let Some(rendered) = make(tx, ty) {
+        for tx in plan.tx0..=plan.tx1 {
+            for ty in plan.ty0..=plan.ty1 {
+                if let Some(rendered) = plan.piece(feature, tx, ty) {
                     out.push(rendered);
                 }
             }
         }
     }
+}
+
+/// Render one feature in bounded **slabs**, invoking `emit` with each slab's
+/// pieces in the exact order [`render_feature`] emits them (zoom ascending,
+/// tx-outer, ty-inner), so feeding each slab to the sort in turn reproduces the
+/// whole feature's feed byte-for-byte. Peak resident output is one slab
+/// (`slab_tiles` covering tiles) regardless of how many tiles the feature
+/// covers — the intra-feature bound the batch chunker cannot give a single
+/// over-budget monster (measured 8.8 GB for one planet feature). Parallel
+/// clipping is kept *within* each slab, so the bound costs resident memory, not
+/// the monster's clip throughput. `emit`'s error type is generic so this stays
+/// free of the pipeline's error type.
+pub fn render_feature_slabbed<E>(
+    feature: &VectorFeature,
+    options: &RenderOptions,
+    slab_tiles: usize,
+    emit: &mut dyn FnMut(Vec<RenderedFeature>) -> Result<(), E>,
+) -> Result<(), E> {
+    let Some(world) = extract(&feature.geometry) else {
+        return Ok(());
+    };
+    let min_z = feature.min_zoom.max(options.min_zoom);
+    let max_z = feature.max_zoom.min(options.max_zoom);
+    let slab_tiles = slab_tiles.max(1);
+    for z in min_z..=max_z {
+        let Some(plan) = prepare_zoom(&world, z, options) else {
+            continue;
+        };
+        // `coords` is the same transient the common parallel path builds; slabs
+        // are its contiguous sub-ranges, so concatenating their (ordered) clips
+        // equals the whole-zoom collect. Empty slabs contribute nothing, exactly
+        // as the common path's `filter_map` drops empty tiles.
+        let coords = plan.coords();
+        for slab in coords.chunks(slab_tiles) {
+            let pieces: Vec<RenderedFeature> = slab
+                .par_iter()
+                .filter_map(|&(tx, ty)| plan.piece(feature, tx, ty))
+                .collect();
+            if !pieces.is_empty() {
+                emit(pieces)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 // --- projection / extraction -------------------------------------------------
@@ -774,5 +874,65 @@ mod tests {
         );
         assert_eq!(predict_pieces(&f, &opts(0, 14)), 4);
         assert_eq!(render_feature(&f, &opts(0, 14)).len(), 4);
+    }
+
+    #[test]
+    fn slabbed_render_matches_whole_and_bounds_slabs() {
+        // Slab-mode must reproduce `render_feature`'s pieces in the identical
+        // order (its byte-identity contract) while holding each emitted slab
+        // within the tile budget (the bound it exists to enforce). A filled
+        // polygon covering a sizeable single-zoom tile rect exercises both.
+        let ring: Vec<_> = [(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)]
+            .iter()
+            .map(|&(wx, wy)| {
+                let (lng, lat) = ll(wx, wy);
+                coord! {x: lng, y: lat}
+            })
+            .collect();
+        let f = feature(
+            Geometry::Polygon(Polygon::new(LineString(ring), vec![])),
+            4,
+            4,
+        );
+        let options = opts(0, 14);
+
+        let whole = render_feature(&f, &options);
+        assert!(
+            whole.len() > 8,
+            "test needs a multi-slab feature, got {} pieces",
+            whole.len()
+        );
+
+        let slab_tiles = 8usize;
+        let mut slabs: Vec<Vec<RenderedFeature>> = Vec::new();
+        render_feature_slabbed(&f, &options, slab_tiles, &mut |slab| {
+            slabs.push(slab);
+            Ok::<(), ()>(())
+        })
+        .unwrap();
+
+        assert!(
+            slabs.len() > 1,
+            "expected multiple slabs, got {}",
+            slabs.len()
+        );
+        for slab in &slabs {
+            assert!(
+                slab.len() <= slab_tiles,
+                "slab of {} pieces exceeds budget {slab_tiles}",
+                slab.len()
+            );
+        }
+
+        // Concatenated slabs == the whole render, piece for piece, in order.
+        let flat: Vec<RenderedFeature> = slabs.into_iter().flatten().collect();
+        assert_eq!(flat.len(), whole.len(), "slab piece count matches whole");
+        for (a, b) in flat.iter().zip(&whole) {
+            assert_eq!(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "slab piece matches whole piece in order"
+            );
+        }
     }
 }
