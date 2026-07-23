@@ -107,6 +107,7 @@ pub fn stream_osm(
     let pass1_start = std::time::Instant::now();
     for_each_block_parallel(
         path,
+        "pass1",
         |block| {
             let mut out = NodeBlock::default();
             for group in block.groups() {
@@ -224,6 +225,7 @@ pub fn stream_osm(
         let memberships = &way_relations;
         for_each_block_parallel(
             path,
+            "pass2",
             |block| {
                 let mut out = WayBlock::default();
                 for group in block.groups() {
@@ -365,7 +367,12 @@ struct WayBlock {
 /// rayon workers; `consume` stays serial and ordered, so node ids reach the
 /// store ascending and feature emission is deterministic. Memory is bounded by
 /// one window of decoded output.
-fn for_each_block_parallel<T, D, C>(path: &Path, decode: D, mut consume: C) -> Result<()>
+fn for_each_block_parallel<T, D, C>(
+    path: &Path,
+    phase: &str,
+    decode: D,
+    mut consume: C,
+) -> Result<()>
 where
     T: Send,
     D: Fn(&PrimitiveBlock) -> T + Sync,
@@ -376,7 +383,21 @@ where
         context: "cannot open OSM PBF",
         message: e.to_string(),
     })?;
+    // Probe: this loop is bulk-synchronous — a serial read of WINDOW blobs, a
+    // parallel decode burst, then a serial consume — with no overlap between the
+    // three. The planet run measured pass 2 at ~12% CPU (load 3.7 on 32 cores),
+    // so most of the wall is idle silicon; splitting it three ways names which
+    // serial phase starves the cores (read = I/O, consume = store writes + sink,
+    // decode = the actual parallel work) and so directs the fix. Three clock
+    // reads per 64-blob window are free; the totals log once per pass. Nothing
+    // here touches the feature stream, so output is byte-identical.
+    let mut read_time = std::time::Duration::ZERO;
+    let mut decode_time = std::time::Duration::ZERO;
+    let mut consume_time = std::time::Duration::ZERO;
+    let mut windows = 0u64;
+    let mut blocks = 0u64;
     loop {
+        let t = std::time::Instant::now();
         let window: Vec<Blob> = reader
             .by_ref()
             .take(WINDOW)
@@ -385,9 +406,11 @@ where
                 context: "failed to read OSM PBF",
                 message: e.to_string(),
             })?;
+        read_time += t.elapsed();
         if window.is_empty() {
             break;
         }
+        let t = std::time::Instant::now();
         let outputs: Vec<Option<T>> = window
             .par_iter()
             .map(|blob| match blob.decode() {
@@ -399,10 +422,24 @@ where
                 }),
             })
             .collect::<Result<_>>()?;
+        decode_time += t.elapsed();
+        windows += 1;
+        blocks += window.len() as u64;
+        let t = std::time::Instant::now();
         for output in outputs.into_iter().flatten() {
             consume(output)?;
         }
+        consume_time += t.elapsed();
     }
+    tracing::info!(
+        phase,
+        read_s = read_time.as_secs_f64(),
+        decode_s = decode_time.as_secs_f64(),
+        consume_s = consume_time.as_secs_f64(),
+        windows,
+        blocks,
+        "block-parallel pass timing (probe)"
+    );
     Ok(())
 }
 

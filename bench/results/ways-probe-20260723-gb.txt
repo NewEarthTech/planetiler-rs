@@ -1,0 +1,8 @@
+2026-07-23T17:08:41.248585Z  INFO planetiler_rs::source::osm: block-parallel pass timing (probe) phase="pass1" read_s=0.376070995 decode_s=5.213618841 consume_s=18.394321502 windows=517 blocks=33063
+2026-07-23T17:08:41.248749Z  INFO planetiler_rs::collection::node_store: sparse node store finished nodes=230257811 runs=31601155 avg_run_len=7.286373267053055 index_heap_mb=482 values_mb=1756
+2026-07-23T17:08:41.306110Z  INFO planetiler_rs::source::osm: osm pass 1 (nodes) done elapsed_s=24.044703125
+2026-07-23T17:10:01.084707Z  INFO planetiler_rs::source::osm: block-parallel pass timing (probe) phase="pass2" read_s=0.370155079 decode_s=10.070619177 consume_s=69.335085686 windows=517 blocks=33063
+2026-07-23T17:10:01.085067Z  INFO planetiler_rs::source::osm: osm pass 2 (ways) done elapsed_s=79.780920375
+2026-07-23T17:10:22.011981Z  INFO planetiler_rs::pipeline: stream consume breakdown (probe) profile_s=35.93377477 render_s=58.578519788
+2026-07-23T17:10:22.011990Z  INFO planetiler_rs::pipeline: stream + render + sort-feed done elapsed_s=124.752911209 entries=44195923
+2026-07-23T17:11:04.892904Z  INFO planetiler_rs::pipeline: merge + encode + write done elapsed_s=42.880605208 tiles=21324
