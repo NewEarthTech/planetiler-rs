@@ -17,6 +17,8 @@ Task: read an `.osm.pbf` extract and write all OSM features into a single `osm` 
 
 **Speed:** ~5× faster (monaco), ~2.2× faster (rhode-island), **1.9× slower (great-britain)** — the crossover where Java's mature parallel throughput overtakes ours now sits between state and country scale (it was "anything bigger than a city" before the optimization rounds). **Memory:** ~13× / ~7× / ~5× less. **Tile counts match at every size** (relations + source-bounds clipping closed them; per-tile content ~50% semantically identical on monaco, the rest sub-pixel — see parity section).
 
+**Planet (2026-07-22): the first complete run.** planetiler-rs finishes the full planet at z12 — 2h 55m, 24 GB anon heap, 13.30 M tiles — vs Planetiler v0.10.2 at **38m 37s** on the same 32-core cloud box: 4.5× slower, with per-phase utilization data naming exactly where the gap lives (two phases at ~12% CPU). Full record and the licensed next levers: `planet-headtohead.md`.
+
 ## Reading the trend (honest)
 
 - **The rhode-island numbers are now a *fair* comparison.** The earlier 4.21 s / 680 MB / 7522-tile row was us doing *less* work than Java: no relations, no element metadata, no bounds clip. With those added (multipolygon/route assembly, `@id/@type/@version/@timestamp`, clip to the source bbox) the output matches — **2217 tiles vs Java's 2203** — and our absolute cost rose to ~7 s / ~1 GB. That is the honest apples-to-apples figure.

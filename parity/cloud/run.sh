@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Launch a dedicated EC2 benchmark box, run a job on it, fetch results, and
 # terminate it. The repo travels as a git bundle (no credentials leave the
-# laptop); the instance schedules its own shutdown at boot (+4h) so a wedged
-# run can't idle for a weekend, and shutdown means terminate.
+# laptop); the instance schedules its own shutdown at boot (+MAX_HOURS, 4h for
+# extract jobs, 14h for planet) so a wedged run can't idle for a weekend, and
+# shutdown means terminate.
 #
 # Usage: parity/cloud/run.sh <job> <ref-a> <ref-b> [rounds] [instance-type] [max-hours] [data-ebs-gb]
 #   e.g. parity/cloud/run.sh gb-ab main perf/parallel-merge
@@ -113,7 +114,7 @@ cleanup() {
     echo "terminating $IID"
     AWS ec2 terminate-instances --instance-ids "$IID" >/dev/null || true
   else
-    echo "leaving $IID running for inspection (self-terminates within 4h); kill it now with:"
+    echo "leaving $IID running for inspection (self-terminates within ${MAX_HOURS}h); kill it now with:"
     echo "  aws --region $REGION ec2 terminate-instances --instance-ids $IID"
   fi
 }
