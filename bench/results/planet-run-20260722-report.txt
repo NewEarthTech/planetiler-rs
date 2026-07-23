@@ -1,0 +1,29 @@
+# planet  2026-07-23T02:15:36Z
+instance: r7gd.8xlarge  cores: 32  kernel: Linux 6.17.0-1019-aws  arch: aarch64
+rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
+java: openjdk version "21.0.11" 2026-04-21
+ref: main  upstream: v0.10.2
+input: https://osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com/planet/pbf/2026/planet-260713.osm.pbf
+input bytes: 93874282582
+scratch: 1.7T total, 1.6T free
+memory: 247 GB
+
+## planetiler-rs (main)
+[2m2026-07-23T02:35:52.999349Z[0m [32m INFO[0m [2mplanetiler_rs::collection::node_store[0m[2m:[0m sparse node store finished [3mnodes[0m[2m=[0m10742674832 [3mruns[0m[2m=[0m496166544 [3mavg_run_len[0m[2m=[0m21.65134864877145 [3mindex_heap_mb[0m[2m=[0m7570 [3mvalues_mb[0m[2m=[0m81960
+[2m2026-07-23T02:35:56.344038Z[0m [32m INFO[0m [2mplanetiler_rs::source::osm[0m[2m:[0m osm pass 1 (nodes) done [3melapsed_s[0m[2m=[0m1219.91465071
+[2m2026-07-23T03:50:06.541534Z[0m [32m INFO[0m [2mplanetiler_rs::source::osm[0m[2m:[0m osm pass 2 (ways) done [3melapsed_s[0m[2m=[0m4450.197445616
+[2m2026-07-23T04:30:52.567768Z[0m [32m INFO[0m [2mplanetiler_rs::pipeline[0m[2m:[0m stream + render + sort-feed done [3melapsed_s[0m[2m=[0m8116.138413952 [3mentries[0m[2m=[0m1553997609
+[2m2026-07-23T04:30:53.326581Z[0m [32m INFO[0m [2mplanetiler_rs::collection::sort[0m[2m:[0m k-way merge opening spilled chunks [3mchunks[0m[2m=[0m369 [3mentries[0m[2m=[0m1553997609
+[2m2026-07-23T05:11:02.635783Z[0m [32m INFO[0m [2mplanetiler_rs::pipeline[0m[2m:[0m merge + encode + write done [3melapsed_s[0m[2m=[0m2410.068004878 [3mtiles[0m[2m=[0m13297463
+rs wall_s: 10527  peak_vmrss_gb: 117  peak_anon_gb: 24  peak_rss_kb: 123349288  rc: 0
+rs mem trajectory: /home/ubuntu/planet-mem.log (1011 samples)
+rs tiles: 13297463
+rs bytes: 77856399360
+
+## Planetiler v0.10.2 (stock defaults; nodemap_type=sparsearray, nodemap_storage=mmap)
+Elapsed (wall clock) time (h:mm:ss or m:ss): 38:37.24
+Maximum resident set size (kbytes): 127652692
+java tiles: 13120762
+java bytes: 82082721792
+
+report: results/planet-20260723-014705.txt
