@@ -139,6 +139,10 @@ scp -q "${SSH_OPTS[@]}" "$BUNDLE" "ubuntu@$IP:repo.bundle"
 RUNNER=remote.sh
 [ "$JOB" = planet ] && RUNNER=remote-planet.sh
 scp -q "${SSH_OPTS[@]}" "$HERE/$RUNNER" "ubuntu@$IP:$RUNNER"
+# The planet runner shells out to tiles-delta.sh once both archives exist, to
+# distill and ship home the tile-set delta before the box (and its archives)
+# die. Travels from the working tree like the runner, not via the bundle.
+[ "$JOB" = planet ] && scp -q "${SSH_OPTS[@]}" "$HERE/tiles-delta.sh" "ubuntu@$IP:tiles-delta.sh"
 rm -f "$BUNDLE"
 
 # nohup with stdin still attached leaves the dispatching ssh hanging; the

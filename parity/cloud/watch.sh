@@ -142,6 +142,17 @@ collected=1
 if [ -n "$rmt_stderr" ] && [ "${stderr_sz:-0}" -lt "$rmt_stderr" ] 2>/dev/null; then collected=0; fi
 if [ -n "$rmt_mem" ] && [ "${mem_sz:-0}" -lt "$rmt_mem" ] 2>/dev/null; then collected=0; fi
 
+# The tile-set delta (tiles-delta.txt + the *.coords.gz sets) only exists on a
+# completed head-to-head, and it is the one artifact that cannot be regenerated
+# once the archives die with the box. If the box produced it but we do not hold
+# a full copy, keep the box — same rule as the stderr/mem diagnostics. Silent
+# when there is no delta (a failed or non-planet run never made the file).
+rmt_delta=$(remote_size results/tiles-delta.txt)
+delta_sz=$(fsize "$OUT_DIR/tiles-delta.txt")
+echo "delta:  local ${delta_sz}B / remote ${rmt_delta:-none}B"
+if [ -n "$rmt_delta" ] && [ "${rmt_delta:-0}" -gt 0 ] 2>/dev/null \
+   && [ "${delta_sz:-0}" -lt "$rmt_delta" ] 2>/dev/null; then collected=0; fi
+
 keep_reason=""
 if [ "$collected" = 0 ]; then
   keep_reason="diagnostics NOT fully collected"
