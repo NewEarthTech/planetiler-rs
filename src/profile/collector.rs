@@ -1,11 +1,18 @@
 //! The feature collector a [`Profile`](super::Profile) emits into.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, LazyLock};
 
 use geo_types::Geometry;
 
 use crate::model::Value;
 use crate::source::SourceFeature;
+
+/// One shared empty attribute map, so `add()` (which emits no source tags) costs
+/// a refcount bump rather than an allocation. `attr()` clones it on first write
+/// via `Arc::make_mut`, and cloning an empty `BTreeMap` allocates nothing.
+static NO_ATTRS: LazyLock<Arc<BTreeMap<String, Value>>> =
+    LazyLock::new(|| Arc::new(BTreeMap::new()));
 
 /// A vector feature emitted by a profile: geometry still in lon/lat, plus the
 /// layer, zoom range, attributes, and z-order that the renderer needs. The
@@ -16,10 +23,12 @@ pub struct VectorFeature {
     pub id: u64,
     /// Target MVT layer name.
     pub layer: String,
-    /// Geometry in lon/lat (WGS84).
-    pub geometry: Geometry<f64>,
-    /// Output attributes.
-    pub attrs: BTreeMap<String, Value>,
+    /// Geometry in lon/lat (WGS84), shared with the [`SourceFeature`] it came
+    /// from — emitting a feature is a refcount bump, not a coordinate copy.
+    pub geometry: Arc<Geometry<f64>>,
+    /// Output attributes, shared with the source feature's tags on the
+    /// passthrough path. [`attr`](Self::attr) copies on write.
+    pub attrs: Arc<BTreeMap<String, Value>>,
     /// Lowest zoom to render at (inclusive).
     pub min_zoom: u8,
     /// Highest zoom to render at (inclusive).
@@ -29,12 +38,12 @@ pub struct VectorFeature {
 }
 
 impl VectorFeature {
-    fn new(id: u64, layer: &str, geometry: Geometry<f64>, min_zoom: u8, max_zoom: u8) -> Self {
+    fn new(id: u64, layer: &str, geometry: Arc<Geometry<f64>>, min_zoom: u8, max_zoom: u8) -> Self {
         Self {
             id,
             layer: layer.to_owned(),
             geometry,
-            attrs: BTreeMap::new(),
+            attrs: Arc::clone(&NO_ATTRS),
             min_zoom,
             max_zoom,
             zorder: 0,
@@ -61,8 +70,12 @@ impl VectorFeature {
     }
 
     /// Set one output attribute.
+    ///
+    /// Copy-on-write: attributes are shared with the source feature's tags until
+    /// something actually changes them, so a profile that only reads them never
+    /// pays for a copy, and one that writes pays exactly once.
     pub fn attr(&mut self, key: &str, value: impl Into<Value>) -> &mut Self {
-        self.attrs.insert(key.to_owned(), value.into());
+        Arc::make_mut(&mut self.attrs).insert(key.to_owned(), value.into());
         self
     }
 
@@ -122,24 +135,25 @@ impl<'s, 'o> FeatureCollector<'s, 'o> {
         self.out.push(VectorFeature::new(
             self.source.id,
             layer,
-            self.source.geometry.clone(),
+            Arc::clone(&self.source.geometry),
             self.default_min_zoom,
             self.default_max_zoom,
         ));
         self.out.last_mut().expect("just pushed")
     }
 
-    /// Emit a feature into `layer` reusing the source geometry and copying all
-    /// of the source's tags (the passthrough behaviour).
+    /// Emit a feature into `layer` reusing the source geometry and carrying all
+    /// of the source's tags (the passthrough behaviour). The tags are shared,
+    /// not copied; [`attr`](VectorFeature::attr) copies on write.
     pub fn add_all_tags(&mut self, layer: &str) -> &mut VectorFeature {
         let mut feature = VectorFeature::new(
             self.source.id,
             layer,
-            self.source.geometry.clone(),
+            Arc::clone(&self.source.geometry),
             self.default_min_zoom,
             self.default_max_zoom,
         );
-        feature.attrs = self.source.tags.clone();
+        feature.attrs = Arc::clone(&self.source.tags);
         self.out.push(feature);
         self.out.last_mut().expect("just pushed")
     }

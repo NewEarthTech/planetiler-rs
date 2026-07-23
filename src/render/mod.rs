@@ -676,8 +676,8 @@ mod tests {
         VectorFeature {
             id: 0,
             layer: "l".to_owned(),
-            geometry,
-            attrs: BTreeMap::new(),
+            geometry: std::sync::Arc::new(geometry),
+            attrs: std::sync::Arc::new(BTreeMap::new()),
             min_zoom,
             max_zoom,
             zorder: 0,
