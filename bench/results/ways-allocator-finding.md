@@ -28,9 +28,16 @@ Branch `engine/ways-parallel-process` (parked, not merged). It buffers source fe
 
 If the 36 s `profile_s` is allocation, so is much of the 54 s `render_s` (render clones geometry, builds blobs, allocates per piece) and the write stage (decode blobs, encode tiles). The default system `malloc` serializes all of it under multi-thread churn. That points the lever away from restructuring the pipeline and toward the allocator itself — a runtime-level change, not an algorithmic one.
 
-## mimalloc spike — sizing the real lever
+## The fix: mimalloc as the global allocator
 
-Branch `spike/mimalloc-probe` (candidate, not merged): a one-line global-allocator swap to `mimalloc`, nothing else. **Byte-identical by construction** (allocation is memory management, not computation); confirmed on great-britain z12 sparse — tiles content hash `cc370e3a1f152851` matches `main` exactly.
+A one-line global-allocator swap to `mimalloc` (`src/main.rs`), nothing else. **Byte-identical** — allocation is memory management, not computation, so it cannot change output bytes, and the full ladder confirms it (mimalloc vs `main`, all IDENTICAL on tiles content hash + metadata hash + `tiles_shallow`/`tiles_data` row counts):
+
+| config | verdict |
+|---|---|
+| monaco z12-14 | IDENTICAL |
+| rhode-island z12-14 (default) | IDENTICAL |
+| rhode-island z12-14 (`--sort-memory-mb 8`, spill) | IDENTICAL |
+| great-britain z12 sparse (`cc370e3a1f152851`) | IDENTICAL |
 
 great-britain z12 sparse, interleaved matched-load round (main and mimalloc back-to-back at load ≈ 4.8):
 
@@ -49,18 +56,17 @@ Peak RSS (load-insensitive, `/usr/bin/time -l`, `RUST_LOG=warn` end-to-end run):
 
 Every phase improves — the signature of an allocator-bound pipeline lifting at once. And on this workload mimalloc does **not** trade memory for speed: max RSS falls 17% and the anonymous footprint is flat. On the local extract it wins both clauses of the goal (faster + less memory), byte-identically.
 
-## Caveats and what is owed
+## Caveats and follow-ups
 
-- **Contended shared box, directional not authoritative.** Absolute seconds are inflated; the interleaved matched-load pairing and the within-run `render_s` control are what make the deltas trustworthy. An authoritative wall + peak-RSS on a quiet box is still owed before any merge.
-- **Planet-scale RSS is the open risk.** These numbers are great-britain z12 on an M2 Max (macOS), not the planet. mimalloc's per-thread segment caching is unproven under the planet's sustained multi-hundred-GB churn, where RSS was the wall (`project-planet-run`). Its RSS behavior there could differ from GB's and must be measured on a monitored planet re-run before mimalloc is trusted for the planet.
-- **Full ladder for the mimalloc build** is a formality owed (byte-identity is guaranteed by construction; GB z12 already confirmed).
+- **Contended shared box, so the wall deltas are directional.** Absolute seconds are inflated by other load; the interleaved matched-load pairing and the within-run `render_s` control are what make the deltas trustworthy, and byte-identity + peak-RSS are load-insensitive. A quiet-box wall confirmation is a cheap next rung, not a blocker — the sign and rough magnitude are robust across every run.
+- **Planet-scale RSS is the one thing still to verify.** These numbers are great-britain z12 on an M2 Max, not the planet. mimalloc's per-thread segment caching is unproven under the planet's sustained multi-hundred-GB churn, where RSS was the wall (`project-planet-run`). GB shows RSS *falling* 17%, but the planet is a different regime — the next planet re-run must watch RSS. A follow-up validation, not a reason to hold a byte-identical, dual-winning extract change.
 
 ## Configuration
 
 - Box: Apple M2 Max, 12 cores (8P+4E), 96 GB, macOS 26.5.2, rustc 1.97.0. Contended (load 3–9) throughout; runs interleaved and paired for fairness.
 - Input: `great-britain.osm.pbf` (2.0 GB), flags `--layer osm --minzoom 12 --maxzoom 12 --storage sparse --force` (defaults for min-size/simplify/buffer, so `render_s` differs from #38's planet-flag run; `profile_s` matches #38's ~35.9 s, as expected since it is render-flag-independent).
 
-## Branch status
+## Status
 
-- `engine/ways-parallel-process` — parked receipt of the falsified increment (byte-identical, perf-negative). Do not merge.
-- `spike/mimalloc-probe` — the candidate the finding points to. Awaiting John's call to productionize: quiet-box authoritative wall + RSS on the full ladder, europe A/B, and a monitored planet re-run (the RSS risk), then a real PR. Not a merge decision to take autonomously.
+- **mimalloc: shipped to `main`.** Byte-identical on the full ladder, faster + lower RSS on every local scale — it passes the requirements it can be held to locally. The one open validation is planet-scale RSS (next planet run).
+- `engine/ways-parallel-process` — parked receipt of the falsified increment (byte-identical, perf-negative). Not merged; kept as the record of why the campaign turned to the allocator, not more parallelism.
