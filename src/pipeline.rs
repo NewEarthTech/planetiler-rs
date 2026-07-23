@@ -117,49 +117,59 @@ where
         simplify_tolerance_px: options.simplify_tolerance_px,
         bounds: options.bounds,
     };
+    // Source features processed per parallel `process_feature` step, and vector
+    // features accumulated before a render flush. Byte-identity is independent of
+    // both (order is preserved and every accumulator they feed is
+    // order-insensitive), so they are purely throughput/memory knobs.
+    const PROFILE_BATCH: usize = 4096;
     const RENDER_BATCH: usize = 4096;
 
-    // The profile pass, stats, and bounds stay serial and cheap; a full batch is
-    // rendered + blob-encoded across cores (order preserved for determinism) and
-    // fed to the sort.
+    // The consume path is two very different costs. Per-feature profile
+    // processing (`process_feature` + collect) is a pure function of the shared
+    // `Sync` profile and one source feature, so a buffered chunk of them runs
+    // across the rayon pool with order preserved (see `drain_pending`) — the
+    // serial term the ways probe measured at ~36 s of GB's pass-2 wall. The
+    // batched render flush is already parallel across cores. bounds +
+    // feature_count stay serial and cheap.
+    let mut pending: Vec<SourceFeature> = Vec::with_capacity(PROFILE_BATCH);
     let mut render_probe = RenderProbe::new();
     let stream_start = std::time::Instant::now();
-    // Probe: the block-parallel pass split showed the serial consume dominates
-    // both passes (pass 2 ~87% of wall on GB). The consume is this sink, which
-    // does two very different things per feature -- serial per-feature profile
-    // processing (process_feature + collect) and the batched render flush (which
-    // is itself parallel across cores). Time them apart so the fix targets the
-    // real cost: a fat profile term means parallelize per-feature work, a fat
-    // render term means overlap decode with the flush. Log-only; output unchanged.
+    // Probe (kept from the ways campaign): time the two consume terms apart. With
+    // per-feature processing now parallel, `profile_s` is the wall of the
+    // par-processed drain (process_feature + collect + stats) and `render_s` the
+    // flush wall — so the campaign can watch profile_s fall against the baseline.
+    // Log-only; output unchanged.
     let mut profile_time = std::time::Duration::ZERO;
     let mut render_time = std::time::Duration::ZERO;
     {
         let mut sink = |source: SourceFeature| -> Result<()> {
             feature_count += 1;
             bounds.add_geometry(&source.geometry);
-            let t = std::time::Instant::now();
-            let mut collector = FeatureCollector::new(&source, options.min_zoom, options.max_zoom);
-            profile.process_feature(&source, &mut collector);
-            for feature in collector.into_features() {
-                record_layer_stats(&mut layer_stats, &feature, options);
-                batch.push(feature);
-            }
-            profile_time += t.elapsed();
-            if batch.len() >= RENDER_BATCH {
+            pending.push(source);
+            if pending.len() >= PROFILE_BATCH {
                 let t = std::time::Instant::now();
-                flush_render_batch(
-                    &mut batch,
-                    &render_options,
-                    &mut registry,
-                    &mut sort,
-                    &mut render_probe,
-                )?;
-                render_time += t.elapsed();
+                drain_pending(&mut pending, profile, &mut layer_stats, &mut batch, options);
+                profile_time += t.elapsed();
+                if batch.len() >= RENDER_BATCH {
+                    let t = std::time::Instant::now();
+                    flush_render_batch(
+                        &mut batch,
+                        &render_options,
+                        &mut registry,
+                        &mut sort,
+                        &mut render_probe,
+                    )?;
+                    render_time += t.elapsed();
+                }
             }
             Ok(())
         };
         stream(&mut sink)?;
     }
+    // Drain the final partial chunk, then flush whatever remains in the batch.
+    let t = std::time::Instant::now();
+    drain_pending(&mut pending, profile, &mut layer_stats, &mut batch, options);
+    profile_time += t.elapsed();
     let t = std::time::Instant::now();
     flush_render_batch(
         &mut batch,
@@ -417,6 +427,47 @@ impl RenderProbe {
             max_flush_predicted_id = self.max_flush_predicted_id,
             "render probe summary"
         );
+    }
+}
+
+/// Turn a buffered chunk of source features into vector features across the
+/// rayon pool, then drain them serially into the render `batch` and fold their
+/// layer stats. This is the per-feature `process_feature` term the ways probe
+/// found dominating the serial consume (~36 s of great-britain's pass-2 wall);
+/// running it in parallel is the ways campaign's first increment.
+///
+/// Byte-identical to processing one feature at a time: `par_iter().collect()`
+/// preserves source order, `process_feature` is a pure function of the shared
+/// (`Sync`) profile and its one source feature, and every accumulator the drain
+/// feeds is insensitive to the order features arrive in — the layer stats are
+/// commutative folds, and the external sort downstream is a total order on the
+/// whole entry, hence a pure function of the multiset of entries fed to it. The
+/// caller flushes `batch` once this returns; `pending` is cleared.
+fn drain_pending(
+    pending: &mut Vec<SourceFeature>,
+    profile: &dyn Profile,
+    layer_stats: &mut BTreeMap<String, LayerStat>,
+    batch: &mut Vec<VectorFeature>,
+    options: &GenerateOptions,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let (min_zoom, max_zoom) = (options.min_zoom, options.max_zoom);
+    let processed: Vec<Vec<VectorFeature>> = pending
+        .par_iter()
+        .map(|source| {
+            let mut collector = FeatureCollector::new(source, min_zoom, max_zoom);
+            profile.process_feature(source, &mut collector);
+            collector.into_features()
+        })
+        .collect();
+    // Free the source features before the caller renders, so peak resident memory
+    // is one profile batch or one render batch's worth, not both plus the output.
+    pending.clear();
+    for feature in processed.into_iter().flatten() {
+        record_layer_stats(layer_stats, &feature, options);
+        batch.push(feature);
     }
 }
 
