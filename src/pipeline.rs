@@ -124,17 +124,29 @@ where
     // fed to the sort.
     let mut render_probe = RenderProbe::new();
     let stream_start = std::time::Instant::now();
+    // Probe: the block-parallel pass split showed the serial consume dominates
+    // both passes (pass 2 ~87% of wall on GB). The consume is this sink, which
+    // does two very different things per feature -- serial per-feature profile
+    // processing (process_feature + collect) and the batched render flush (which
+    // is itself parallel across cores). Time them apart so the fix targets the
+    // real cost: a fat profile term means parallelize per-feature work, a fat
+    // render term means overlap decode with the flush. Log-only; output unchanged.
+    let mut profile_time = std::time::Duration::ZERO;
+    let mut render_time = std::time::Duration::ZERO;
     {
         let mut sink = |source: SourceFeature| -> Result<()> {
             feature_count += 1;
             bounds.add_geometry(&source.geometry);
+            let t = std::time::Instant::now();
             let mut collector = FeatureCollector::new(&source, options.min_zoom, options.max_zoom);
             profile.process_feature(&source, &mut collector);
             for feature in collector.into_features() {
                 record_layer_stats(&mut layer_stats, &feature, options);
                 batch.push(feature);
             }
+            profile_time += t.elapsed();
             if batch.len() >= RENDER_BATCH {
+                let t = std::time::Instant::now();
                 flush_render_batch(
                     &mut batch,
                     &render_options,
@@ -142,11 +154,13 @@ where
                     &mut sort,
                     &mut render_probe,
                 )?;
+                render_time += t.elapsed();
             }
             Ok(())
         };
         stream(&mut sink)?;
     }
+    let t = std::time::Instant::now();
     flush_render_batch(
         &mut batch,
         &render_options,
@@ -154,7 +168,13 @@ where
         &mut sort,
         &mut render_probe,
     )?;
+    render_time += t.elapsed();
     render_probe.log_summary(true);
+    tracing::info!(
+        profile_s = profile_time.as_secs_f64(),
+        render_s = render_time.as_secs_f64(),
+        "stream consume breakdown (probe)"
+    );
     tracing::info!(
         elapsed_s = stream_start.elapsed().as_secs_f64(),
         entries = sort.len(),
