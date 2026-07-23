@@ -236,6 +236,20 @@ else
   say "java: FAILED"
 fi
 
+# Tile-set delta while both archives still exist on the box. The whole-planet
+# head-to-head leaves rs a +176,701-tile superset of Java, opposite the sign of
+# the country-scale delta; explaining it needs the actual coordinate sets, but a
+# planet run's archives die with the instance (only results/ ships home). Distil
+# the delta here -- full coord sets, the one-sided sets, per-zoom + size
+# histograms -- into results/, which watch.sh collects. Non-fatal: a completed
+# head-to-head is not lost to a delta hiccup.
+if [ -f /data/out/rs.mbtiles ] && [ -f /data/out/java.mbtiles ]; then
+  say ""
+  say "## tile-set delta (rs vs java) -- results/tiles-delta.txt + *.coords.gz"
+  bash "$HOME/tiles-delta.sh" /data/out/rs.mbtiles /data/out/java.mbtiles results \
+    2>&1 | tee -a "$REPORT" || say "tiles-delta.sh failed (non-fatal)"
+fi
+
 say ""
 say "report: $REPORT"
 echo DONE > status
