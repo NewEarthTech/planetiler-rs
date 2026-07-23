@@ -75,35 +75,58 @@ impl VectorFeature {
 
 /// Collects the [`VectorFeature`]s a profile emits for one source feature. Bound
 /// to that source feature so `add` reuses its geometry.
-pub struct FeatureCollector<'a> {
-    source: &'a SourceFeature,
-    features: Vec<VectorFeature>,
+///
+/// Emitted features are appended straight to a caller-owned output `Vec` (the
+/// pipeline's render batch) rather than to a per-source-feature `Vec` the caller
+/// then drains. A collector is constructed and dropped once per source feature
+/// on the serial consume path, so owning a `Vec` cost an allocate/free pair plus
+/// a move of every emitted feature, per feature, for a buffer that almost always
+/// held exactly one element. `first()` is where a source feature's own features
+/// start in that shared buffer.
+pub struct FeatureCollector<'s, 'o> {
+    source: &'s SourceFeature,
+    out: &'o mut Vec<VectorFeature>,
+    first: usize,
     default_min_zoom: u8,
     default_max_zoom: u8,
 }
 
-impl<'a> FeatureCollector<'a> {
-    /// Create a collector for one source feature with the default zoom range.
-    pub fn new(source: &'a SourceFeature, default_min_zoom: u8, default_max_zoom: u8) -> Self {
+impl<'s, 'o> FeatureCollector<'s, 'o> {
+    /// Create a collector for one source feature with the default zoom range,
+    /// appending everything it emits to `out`.
+    pub fn new(
+        source: &'s SourceFeature,
+        out: &'o mut Vec<VectorFeature>,
+        default_min_zoom: u8,
+        default_max_zoom: u8,
+    ) -> Self {
+        let first = out.len();
         Self {
             source,
-            features: Vec::new(),
+            out,
+            first,
             default_min_zoom,
             default_max_zoom,
         }
     }
 
+    /// Index in the output `Vec` where this source feature's emitted features
+    /// begin — the caller's handle on just what this collector produced.
+    pub fn first(&self) -> usize {
+        self.first
+    }
+
     /// Emit a feature into `layer` reusing the source geometry, with no
     /// attributes. Returns a handle for further configuration.
     pub fn add(&mut self, layer: &str) -> &mut VectorFeature {
-        self.features.push(VectorFeature::new(
+        self.out.push(VectorFeature::new(
             self.source.id,
             layer,
             self.source.geometry.clone(),
             self.default_min_zoom,
             self.default_max_zoom,
         ));
-        self.features.last_mut().expect("just pushed")
+        self.out.last_mut().expect("just pushed")
     }
 
     /// Emit a feature into `layer` reusing the source geometry and copying all
@@ -117,12 +140,7 @@ impl<'a> FeatureCollector<'a> {
             self.default_max_zoom,
         );
         feature.attrs = self.source.tags.clone();
-        self.features.push(feature);
-        self.features.last_mut().expect("just pushed")
-    }
-
-    /// Consume the collector, yielding the emitted features.
-    pub fn into_features(self) -> Vec<VectorFeature> {
-        self.features
+        self.out.push(feature);
+        self.out.last_mut().expect("just pushed")
     }
 }

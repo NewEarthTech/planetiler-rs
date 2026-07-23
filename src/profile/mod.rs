@@ -111,10 +111,12 @@ mod tests {
     #[test]
     fn passthrough_copies_geometry_and_tags() {
         let src = source();
-        let mut collector = FeatureCollector::new(&src, 0, 14);
-        PassthroughProfile::new("poi").process_feature(&src, &mut collector);
+        let mut features = Vec::new();
+        {
+            let mut collector = FeatureCollector::new(&src, &mut features, 0, 14);
+            PassthroughProfile::new("poi").process_feature(&src, &mut collector);
+        }
 
-        let features = collector.into_features();
         assert_eq!(features.len(), 1);
         assert_eq!(features[0].layer, "poi");
         assert_eq!(features[0].attrs.get("name"), Some(&Value::from("Casino")));
@@ -134,9 +136,11 @@ mod tests {
         }
 
         let src = source();
-        let mut collector = FeatureCollector::new(&src, 0, 14);
-        Roads.process_feature(&src, &mut collector);
-        let features = collector.into_features();
+        let mut features = Vec::new();
+        {
+            let mut collector = FeatureCollector::new(&src, &mut features, 0, 14);
+            Roads.process_feature(&src, &mut collector);
+        }
 
         assert_eq!(features[0].layer, "road");
         assert_eq!(features[0].attrs.get("kind"), Some(&Value::from("primary")));
