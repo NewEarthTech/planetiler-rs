@@ -1045,7 +1045,7 @@ fn record_layer_stats(
     let entry = stats.get_mut(&feature.layer).expect("inserted above");
     entry.min_zoom = entry.min_zoom.min(min_z);
     entry.max_zoom = entry.max_zoom.max(max_z);
-    for (key, value) in &feature.attrs {
+    for (key, value) in feature.attrs.iter() {
         let ty = field_type(value);
         // `FieldType` is `Copy`, so copying the looked-up type out ends the
         // borrow and lets the rare widen path take `&mut` again.
@@ -1183,6 +1183,7 @@ fn for_each_coord(geometry: &Geometry<f64>, f: &mut impl FnMut(f64, f64)) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use geo_types::{Geometry, Point};
     use rusqlite::Connection;
@@ -1195,8 +1196,8 @@ mod tests {
     fn point(id: u64, lng: f64, lat: f64, name: &str) -> SourceFeature {
         SourceFeature {
             id,
-            geometry: Geometry::Point(Point::new(lng, lat)),
-            tags: BTreeMap::from([("name".to_owned(), Value::from(name))]),
+            geometry: Arc::new(Geometry::Point(Point::new(lng, lat))),
+            tags: Arc::new(BTreeMap::from([("name".to_owned(), Value::from(name))])),
             relations: Vec::new(),
         }
     }
@@ -1356,11 +1357,11 @@ mod tests {
             let (bx, by) = world_to_lng_lat(to.0, to.1);
             SourceFeature {
                 id,
-                geometry: Geometry::LineString(LineString(vec![
+                geometry: Arc::new(Geometry::LineString(LineString(vec![
                     coord! {x: ax, y: ay},
                     coord! {x: bx, y: by},
-                ])),
-                tags: BTreeMap::from([("kind".to_owned(), Value::from("road"))]),
+                ]))),
+                tags: Arc::new(BTreeMap::from([("kind".to_owned(), Value::from("road"))])),
                 relations: Vec::new(),
             }
         };

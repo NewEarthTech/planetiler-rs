@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use geo_types::Geometry;
 
@@ -37,8 +38,8 @@ pub fn stream_geojson(path: &Path, sink: &mut FeatureSink) -> Result<()> {
         ::geojson::GeoJson::Geometry(geometry) => {
             sink(SourceFeature {
                 id: 0,
-                geometry: convert_geometry(geometry)?,
-                tags: BTreeMap::new(),
+                geometry: Arc::new(convert_geometry(geometry)?),
+                tags: Arc::new(BTreeMap::new()),
                 relations: Vec::new(),
             })?;
         }
@@ -78,8 +79,8 @@ fn convert_feature(feature: ::geojson::Feature, fallback_id: u64) -> Result<Opti
 
     Ok(Some(SourceFeature {
         id,
-        geometry,
-        tags,
+        geometry: Arc::new(geometry),
+        tags: Arc::new(tags),
         relations: Vec::new(),
     }))
 }
@@ -136,11 +137,11 @@ mod tests {
         assert_eq!(features[0].tag("name"), Some(&Value::String("A".into())));
         assert_eq!(features[0].tag("lanes"), Some(&Value::Int(3)));
         assert_eq!(features[0].tag("toll"), Some(&Value::Bool(true)));
-        assert!(matches!(features[0].geometry, Geometry::Point(_)));
+        assert!(matches!(*features[0].geometry, Geometry::Point(_)));
 
         // Missing id falls back to the feature index.
         assert_eq!(features[1].id, 1);
-        assert!(matches!(features[1].geometry, Geometry::LineString(_)));
+        assert!(matches!(*features[1].geometry, Geometry::LineString(_)));
     }
 
     #[test]

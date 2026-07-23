@@ -80,9 +80,15 @@ pub struct SourceFeature {
     /// Source-assigned id (feature index when the source has none).
     pub id: u64,
     /// Geometry in lon/lat (WGS84) — `x` is longitude, `y` is latitude.
-    pub geometry: Geometry<f64>,
-    /// Attribute tags.
-    pub tags: BTreeMap<String, Value>,
+    ///
+    /// Shared rather than owned outright so a profile emitting this feature into
+    /// a layer hands the renderer a refcount bump instead of a deep copy of
+    /// every coordinate — see [`FeatureCollector::add`](crate::profile::FeatureCollector::add).
+    pub geometry: Arc<Geometry<f64>>,
+    /// Attribute tags. Shared for the same reason as `geometry`: the passthrough
+    /// path moves them straight through to the output feature, and deep-cloning
+    /// a tag map costs an allocation per key and per string value.
+    pub tags: Arc<BTreeMap<String, Value>>,
     /// Relation memberships the profile asked to index (ways only; empty
     /// unless a [`RelationPreprocessor`] returned info for a containing
     /// relation).

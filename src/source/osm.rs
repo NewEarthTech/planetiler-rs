@@ -479,8 +479,8 @@ fn add_metadata(
 fn point(id: i64, lon: f64, lat: f64, tags: BTreeMap<String, Value>) -> SourceFeature {
     SourceFeature {
         id: feature_id(id, NODE_KIND),
-        geometry: Geometry::Point(Point::new(lon, lat)),
-        tags,
+        geometry: Arc::new(Geometry::Point(Point::new(lon, lat))),
+        tags: Arc::new(tags),
         relations: Vec::new(),
     }
 }
@@ -499,8 +499,8 @@ fn way_feature(
     };
     Some(SourceFeature {
         id: feature_id(id, WAY_KIND),
-        geometry,
-        tags,
+        geometry: Arc::new(geometry),
+        tags: Arc::new(tags),
         relations,
     })
 }
@@ -548,8 +548,8 @@ fn assemble_relation(
     };
     Some(SourceFeature {
         id: feature_id(relation.id, RELATION_KIND),
-        geometry,
-        tags: relation.decode_tags(),
+        geometry: Arc::new(geometry),
+        tags: Arc::new(relation.decode_tags()),
         relations: Vec::new(),
     })
 }
@@ -728,7 +728,7 @@ mod tests {
     fn closed_building_is_polygon() {
         let square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0), (0.0, 0.0)];
         let f = way_feature(1, &square, tags(&[("building", "yes")]), Vec::new()).unwrap();
-        assert!(matches!(f.geometry, Geometry::Polygon(_)));
+        assert!(matches!(*f.geometry, Geometry::Polygon(_)));
         assert_eq!(f.id, feature_id(1, WAY_KIND));
     }
 
@@ -742,14 +742,14 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        assert!(matches!(f.geometry, Geometry::LineString(_)));
+        assert!(matches!(*f.geometry, Geometry::LineString(_)));
     }
 
     #[test]
     fn open_way_is_line() {
         let path = [(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)];
         let f = way_feature(3, &path, tags(&[("highway", "primary")]), Vec::new()).unwrap();
-        assert!(matches!(f.geometry, Geometry::LineString(_)));
+        assert!(matches!(*f.geometry, Geometry::LineString(_)));
     }
 
     #[test]
@@ -762,7 +762,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        assert!(matches!(f.geometry, Geometry::LineString(_)));
+        assert!(matches!(*f.geometry, Geometry::LineString(_)));
     }
 
     #[test]
@@ -801,7 +801,7 @@ mod tests {
         let feature = assemble_relation(&relation, &member_ways).unwrap();
         assert_eq!(feature.id, feature_id(7, RELATION_KIND));
         assert_eq!(feature.tags.get("natural"), Some(&Value::from("water")));
-        match feature.geometry {
+        match &*feature.geometry {
             Geometry::Polygon(p) => assert_eq!(p.interiors().len(), 1, "the inner ring is a hole"),
             other => panic!("expected polygon, got {other:?}"),
         }
@@ -820,7 +820,7 @@ mod tests {
             members: vec![(1, false), (2, false)],
         };
         let feature = assemble_relation(&relation, &member_ways).unwrap();
-        match feature.geometry {
+        match &*feature.geometry {
             Geometry::MultiLineString(mls) => assert_eq!(mls.0.len(), 2),
             other => panic!("expected multilinestring, got {other:?}"),
         }

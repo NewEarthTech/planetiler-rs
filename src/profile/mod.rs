@@ -90,6 +90,7 @@ impl Profile for PassthroughProfile {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use geo_types::{Geometry, Point};
 
@@ -99,11 +100,11 @@ mod tests {
     fn source() -> SourceFeature {
         SourceFeature {
             id: 1,
-            geometry: Geometry::Point(Point::new(7.42, 43.73)),
-            tags: BTreeMap::from([
+            geometry: Arc::new(Geometry::Point(Point::new(7.42, 43.73))),
+            tags: Arc::new(BTreeMap::from([
                 ("name".to_owned(), Value::from("Casino")),
                 ("rank".to_owned(), Value::Int(1)),
-            ]),
+            ])),
             relations: Vec::new(),
         }
     }
@@ -150,5 +151,45 @@ mod tests {
             !features[0].attrs.contains_key("name"),
             "add() does not copy source tags"
         );
+    }
+
+    #[test]
+    fn attr_copies_on_write_instead_of_mutating_shared_tags() {
+        // Output attributes are shared with the source's tags until written, so
+        // the sharing must be invisible: writing through one emitted feature must
+        // not reach the source or any sibling feature. `Arc::make_mut` is what
+        // guarantees it; this is the behavioural check that it is actually used.
+        struct TwoLayers;
+        impl Profile for TwoLayers {
+            fn process_feature(&self, _s: &SourceFeature, f: &mut FeatureCollector) {
+                f.add_all_tags("a").attr("name", "overridden");
+                f.add_all_tags("b");
+            }
+        }
+
+        let src = source();
+        let mut features = Vec::new();
+        {
+            let mut collector = FeatureCollector::new(&src, &mut features, 0, 14);
+            TwoLayers.process_feature(&src, &mut collector);
+        }
+
+        assert_eq!(
+            features[0].attrs.get("name"),
+            Some(&Value::from("overridden")),
+            "the write lands on the feature that made it"
+        );
+        assert_eq!(
+            features[1].attrs.get("name"),
+            Some(&Value::from("Casino")),
+            "a sibling feature still sees the source tags"
+        );
+        assert_eq!(
+            src.tags.get("name"),
+            Some(&Value::from("Casino")),
+            "the source feature's own tags are untouched"
+        );
+        // Untouched keys survive the copy.
+        assert_eq!(features[0].attrs.get("rank"), Some(&Value::Int(1)));
     }
 }

@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use geo::MapCoords;
 use geo_types::Coord;
@@ -55,8 +56,8 @@ pub fn stream_shapefile(path: &Path, sink: &mut FeatureSink) -> Result<()> {
 
         sink(SourceFeature {
             id: index as u64,
-            geometry,
-            tags,
+            geometry: Arc::new(geometry),
+            tags: Arc::new(tags),
             relations: Vec::new(),
         })?;
     }
@@ -160,7 +161,7 @@ mod tests {
         assert_eq!(features[0].tag("name"), Some(&Value::from("water")));
         assert_eq!(features[0].tag("rank"), Some(&Value::Double(2.0)));
         assert!(matches!(
-            features[0].geometry,
+            *features[0].geometry,
             geo_types::Geometry::MultiPolygon(_)
         ));
     }
@@ -181,7 +182,7 @@ mod tests {
         assert_eq!(features[0].tag("name"), Some(&Value::from("river")));
         assert_eq!(features[0].tag("rank"), None, "null numeric omitted");
         assert!(matches!(
-            features[0].geometry,
+            *features[0].geometry,
             geo_types::Geometry::MultiLineString(_)
         ));
     }
@@ -209,7 +210,7 @@ mod tests {
 
         let features = collect(&path);
         assert_eq!(features.len(), 1);
-        let geo_types::Geometry::Point(p) = &features[0].geometry else {
+        let geo_types::Geometry::Point(p) = &*features[0].geometry else {
             panic!("expected point");
         };
         assert!((p.x() - 1.0).abs() < 1e-6, "lon {}", p.x());
