@@ -138,11 +138,17 @@ where
             feature_count += 1;
             bounds.add_geometry(&source.geometry);
             let t = std::time::Instant::now();
-            let mut collector = FeatureCollector::new(&source, options.min_zoom, options.max_zoom);
-            profile.process_feature(&source, &mut collector);
-            for feature in collector.into_features() {
-                record_layer_stats(&mut layer_stats, &feature, options);
-                batch.push(feature);
+            // The collector appends straight into the render batch, so a source
+            // feature's own output is `batch[first..]` — no per-feature `Vec` to
+            // allocate, fill, drain and free on this serial path.
+            let first = {
+                let mut collector =
+                    FeatureCollector::new(&source, &mut batch, options.min_zoom, options.max_zoom);
+                profile.process_feature(&source, &mut collector);
+                collector.first()
+            };
+            for feature in &batch[first..] {
+                record_layer_stats(&mut layer_stats, feature, options);
             }
             profile_time += t.elapsed();
             if batch.len() >= RENDER_BATCH {
@@ -504,12 +510,12 @@ fn render_chunk(
             &mut |slab: Vec<RenderedFeature>| -> Result<()> {
                 // Encode this slab's blobs in parallel (as the common path does),
                 // then feed the sort serially in order.
-                let encoded: Vec<(TileCoord, String, i32, Vec<u8>)> = slab
+                let encoded: Vec<(TileCoord, &str, i32, Vec<u8>)> = slab
                     .into_par_iter()
                     .map(|r| {
-                        let blob = encode_blob(&FeatureBlob {
+                        let blob = encode_blob_ref(&FeatureBlobRef {
                             id: r.id,
-                            geometry: r.geometry,
+                            geometry: &r.geometry,
                             attrs: r.attrs,
                         })
                         .expect("feature blob encode is infallible for rendered features");
@@ -522,7 +528,7 @@ fn render_chunk(
                     .map(|(_, layer, _, blob)| blob.len() + layer.len())
                     .sum();
                 for (coord, layer_name, zorder, blob) in encoded {
-                    let layer = registry.intern(&layer_name)?;
+                    let layer = registry.intern(layer_name)?;
                     sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
                 }
                 // Record each slab as its OWN flush: resident output is one slab,
@@ -539,15 +545,15 @@ fn render_chunk(
         return Ok(());
     }
 
-    let rendered: Vec<(TileCoord, String, i32, Vec<u8>)> = chunk
+    let rendered: Vec<(TileCoord, &str, i32, Vec<u8>)> = chunk
         .par_iter()
         .flat_map_iter(|feature| {
             render_feature(feature, render_options)
                 .into_iter()
                 .map(|r| {
-                    let blob = encode_blob(&FeatureBlob {
+                    let blob = encode_blob_ref(&FeatureBlobRef {
                         id: r.id,
-                        geometry: r.geometry,
+                        geometry: &r.geometry,
                         attrs: r.attrs,
                     })
                     .expect("feature blob encode is infallible for rendered features");
@@ -565,7 +571,7 @@ fn render_chunk(
         .sum();
     probe.record(&profile, pieces, bytes);
     for (coord, layer_name, zorder, blob) in rendered {
-        let layer = registry.intern(&layer_name)?;
+        let layer = registry.intern(layer_name)?;
         sort.add(Entry::new(SortKey::new(coord, layer, zorder)?, blob))?;
     }
     Ok(())
@@ -929,7 +935,8 @@ fn encode_raw_tile(
     Ok(Some((raw.coord, bytes)))
 }
 
-/// The opaque per-feature payload sorted alongside the sort key.
+/// The opaque per-feature payload sorted alongside the sort key. Owned; this is
+/// the shape the write stage decodes back into.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FeatureBlob {
     id: u64,
@@ -937,7 +944,30 @@ struct FeatureBlob {
     attrs: BTreeMap<String, Value>,
 }
 
+/// The encode-side twin of [`FeatureBlob`], borrowing what a
+/// [`RenderedFeature`] borrows so the render never has to materialize an owned
+/// copy just to serialize it.
+///
+/// **This encodes byte-for-byte identically to [`FeatureBlob`].** postcard
+/// writes a struct as its fields' encodings concatenated — no names, no field
+/// count — and serde's `impl Serialize for &T` forwards straight to `T`, so a
+/// borrowed field and an owned field of the same type emit the same bytes. The
+/// two structs have the same fields in the same order and the same underlying
+/// types, so `encode_blob_ref` is a drop-in for `encode_blob`;
+/// `blob_ref_encodes_identically_to_owned` pins that down as a test.
+#[derive(serde::Serialize)]
+struct FeatureBlobRef<'a> {
+    id: u64,
+    geometry: &'a mvt::Geometry,
+    attrs: &'a BTreeMap<String, Value>,
+}
+
+#[cfg(test)]
 fn encode_blob(blob: &FeatureBlob) -> Result<Vec<u8>> {
+    postcard::to_allocvec(blob).map_err(|_| Error::Codec("feature blob encode failed"))
+}
+
+fn encode_blob_ref(blob: &FeatureBlobRef<'_>) -> Result<Vec<u8>> {
     postcard::to_allocvec(blob).map_err(|_| Error::Codec("feature blob encode failed"))
 }
 
@@ -996,25 +1026,40 @@ fn record_layer_stats(
     if min_z > max_z {
         return;
     }
-    let entry = stats.entry(feature.layer.clone()).or_insert(LayerStat {
-        fields: BTreeMap::new(),
-        min_zoom: min_z,
-        max_zoom: max_z,
-    });
+    // `BTreeMap::entry` takes its key by value, so the natural `entry(k.clone())`
+    // allocates a `String` for every feature's layer and for every one of its
+    // attribute keys — and past the first handful of features those keys are
+    // always already present, making the allocation pure waste on the serial
+    // consume path. Look the key up first and clone only when it is genuinely
+    // new. The resulting map is identical, entry for entry.
+    if !stats.contains_key(&feature.layer) {
+        stats.insert(
+            feature.layer.clone(),
+            LayerStat {
+                fields: BTreeMap::new(),
+                min_zoom: min_z,
+                max_zoom: max_z,
+            },
+        );
+    }
+    let entry = stats.get_mut(&feature.layer).expect("inserted above");
     entry.min_zoom = entry.min_zoom.min(min_z);
     entry.max_zoom = entry.max_zoom.max(max_z);
     for (key, value) in &feature.attrs {
         let ty = field_type(value);
-        entry
-            .fields
-            .entry(key.clone())
-            // A key seen with differing types widens to String, like upstream.
-            .and_modify(|existing| {
-                if *existing != ty {
-                    *existing = FieldType::String;
+        // `FieldType` is `Copy`, so copying the looked-up type out ends the
+        // borrow and lets the rare widen path take `&mut` again.
+        match entry.fields.get(key).copied() {
+            Some(existing) => {
+                // A key seen with differing types widens to String, like upstream.
+                if existing != ty {
+                    *entry.fields.get_mut(key).expect("present") = FieldType::String;
                 }
-            })
-            .or_insert(ty);
+            }
+            None => {
+                entry.fields.insert(key.clone(), ty);
+            }
+        }
     }
 }
 
@@ -1353,6 +1398,67 @@ mod tests {
             }
             other => panic!("expected lines, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn blob_ref_encodes_identically_to_owned() {
+        // The render feeds the sort with blobs encoded from *borrowed* attrs and
+        // geometry. That is only byte-identity-safe if the borrowed twin encodes
+        // exactly as the owned struct did, so assert it directly — over every
+        // geometry kind and both attribute value shapes — and confirm the bytes
+        // still decode through the owned struct the write stage uses.
+        let attrs = BTreeMap::from([
+            ("name".to_owned(), Value::from("Casino")),
+            ("rank".to_owned(), Value::Int(-3)),
+            ("open".to_owned(), Value::Bool(true)),
+            ("area".to_owned(), Value::Double(1.5)),
+        ]);
+        let geometries = [
+            mvt::Geometry::Points(vec![(1, 2), (3, 4)]),
+            mvt::Geometry::Lines(vec![vec![(0, 0), (10, 10)]]),
+            mvt::Geometry::Polygons(vec![vec![(0, 0), (4, 0), (4, 4)]]),
+            mvt::Geometry::Unknown,
+        ];
+        for geometry in geometries {
+            let owned = FeatureBlob {
+                id: 42,
+                geometry: geometry.clone(),
+                attrs: attrs.clone(),
+            };
+            let borrowed = FeatureBlobRef {
+                id: 42,
+                geometry: &geometry,
+                attrs: &attrs,
+            };
+            let from_owned = encode_blob(&owned).unwrap();
+            let from_ref = encode_blob_ref(&borrowed).unwrap();
+            assert_eq!(
+                from_owned, from_ref,
+                "borrowed blob must encode byte-identically for {geometry:?}"
+            );
+            let round = decode_blob(&from_ref).unwrap();
+            assert_eq!(round.id, 42);
+            assert_eq!(round.geometry, geometry);
+            assert_eq!(round.attrs, attrs);
+        }
+
+        // Empty attrs is the `add()` (no source tags) path.
+        let empty = BTreeMap::new();
+        let geometry = mvt::Geometry::Points(vec![(7, 9)]);
+        assert_eq!(
+            encode_blob(&FeatureBlob {
+                id: 0,
+                geometry: geometry.clone(),
+                attrs: empty.clone(),
+            })
+            .unwrap(),
+            encode_blob_ref(&FeatureBlobRef {
+                id: 0,
+                geometry: &geometry,
+                attrs: &empty,
+            })
+            .unwrap()
+        );
     }
 
     #[test]

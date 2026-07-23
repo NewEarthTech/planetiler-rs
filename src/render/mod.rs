@@ -64,26 +64,39 @@ enum RenderGeometry {
 
 /// One feature rendered into a single tile — everything the pipeline needs to
 /// build a sort key and serialize the feature blob.
+///
+/// The layer name and attributes are **borrowed from the source
+/// [`VectorFeature`]**, which outlives every piece rendered from it. Only the
+/// clipped geometry is per-tile and therefore owned. Owning them instead meant a
+/// `String` allocation and a full `BTreeMap` deep clone (one allocation per key,
+/// per string value) for *every covering tile* of every feature — copies whose
+/// entire life is the next statement, which serializes them into the feature
+/// blob and drops them. On a pipeline measured to be allocator-bound
+/// (`bench/results/ways-allocator-finding.md`) that was the largest single
+/// source of avoidable allocation in the render.
 #[derive(Debug, Clone)]
-pub struct RenderedFeature {
+pub struct RenderedFeature<'a> {
     /// Target tile.
     pub coord: TileCoord,
-    /// MVT layer name.
-    pub layer: String,
+    /// MVT layer name (borrowed from the source feature).
+    pub layer: &'a str,
     /// Draw order within the tile+layer.
     pub zorder: i32,
     /// Feature id.
     pub id: u64,
     /// Tile-space geometry.
     pub geometry: mvt::Geometry,
-    /// Feature attributes.
-    pub attrs: BTreeMap<String, Value>,
+    /// Feature attributes (borrowed from the source feature).
+    pub attrs: &'a BTreeMap<String, Value>,
 }
 
 /// Render one vector feature into every covering tile across its zoom range
 /// (intersected with the options' range), returning one [`RenderedFeature`] per
 /// covering tile.
-pub fn render_feature(feature: &VectorFeature, options: &RenderOptions) -> Vec<RenderedFeature> {
+pub fn render_feature<'f>(
+    feature: &'f VectorFeature,
+    options: &RenderOptions,
+) -> Vec<RenderedFeature<'f>> {
     let mut out = Vec::new();
     let Some(world) = extract(&feature.geometry) else {
         return out;
@@ -180,15 +193,20 @@ impl PreparedZoom {
     }
 
     /// Clip the prepared geometry into one tile, or `None` if nothing lands.
-    fn piece(&self, feature: &VectorFeature, tx: u32, ty: u32) -> Option<RenderedFeature> {
+    fn piece<'f>(
+        &self,
+        feature: &'f VectorFeature,
+        tx: u32,
+        ty: u32,
+    ) -> Option<RenderedFeature<'f>> {
         clip_to_tile(&self.geometry, tx, ty, self.extent, &self.rect).map(|tile_geometry| {
             RenderedFeature {
                 coord: TileCoord::new(self.z, tx, ty).expect("tile in range"),
-                layer: feature.layer.clone(),
+                layer: &feature.layer,
                 zorder: feature.zorder,
                 id: feature.id,
                 geometry: tile_geometry,
-                attrs: feature.attrs.clone(),
+                attrs: &feature.attrs,
             }
         })
     }
@@ -260,12 +278,12 @@ fn prepare_zoom(world: &RenderGeometry, z: u8, options: &RenderOptions) -> Optio
 /// The ordered collect keeps output identical to the serial loop.
 const PARALLEL_TILE_THRESHOLD: u64 = 256;
 
-fn render_at_zoom(
-    feature: &VectorFeature,
+fn render_at_zoom<'f>(
+    feature: &'f VectorFeature,
     world: &RenderGeometry,
     z: u8,
     options: &RenderOptions,
-    out: &mut Vec<RenderedFeature>,
+    out: &mut Vec<RenderedFeature<'f>>,
 ) {
     let Some(plan) = prepare_zoom(world, z, options) else {
         return;
@@ -298,11 +316,11 @@ fn render_at_zoom(
 /// clipping is kept *within* each slab, so the bound costs resident memory, not
 /// the monster's clip throughput. `emit`'s error type is generic so this stays
 /// free of the pipeline's error type.
-pub fn render_feature_slabbed<E>(
-    feature: &VectorFeature,
+pub fn render_feature_slabbed<'f, E>(
+    feature: &'f VectorFeature,
     options: &RenderOptions,
     slab_tiles: usize,
-    emit: &mut dyn FnMut(Vec<RenderedFeature>) -> Result<(), E>,
+    emit: &mut dyn FnMut(Vec<RenderedFeature<'f>>) -> Result<(), E>,
 ) -> Result<(), E> {
     let Some(world) = extract(&feature.geometry) else {
         return Ok(());
