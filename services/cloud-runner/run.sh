@@ -169,7 +169,7 @@ LIVE_HINT="(disabled — no $DRAIN_PROFILE profile)"
 if [ "${#PROFILE_ARGS[@]}" -gt 0 ]; then
   scp -q "${SSH_OPTS[@]}" "$HERE/drain.sh" "ubuntu@$IP:drain.sh"
   ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-    "chmod +x drain.sh && nohup env DRAIN_GROUP='$DRAIN_GROUP' DRAIN_REGION='$DRAIN_REGION' ./drain.sh '$RUN_ID' > drain.log 2>&1 < /dev/null & echo 'drain started'"
+    "chmod +x drain.sh && nohup env DRAIN_GROUP='$DRAIN_GROUP' DRAIN_REGION='$DRAIN_REGION' DRAIN_POLL=1 ./drain.sh '$RUN_ID' > drain.log 2>&1 < /dev/null & echo 'drain started'"
   LIVE_HINT="https://runner.johncarmack.com (run $RUN_ID)"
   echo "live console: $LIVE_HINT"
 fi
