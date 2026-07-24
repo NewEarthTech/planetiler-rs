@@ -57,3 +57,17 @@ jobs:
           cache-targets: "false"
       - uses: mozilla-actions/sccache-action@v0.0.10
       - run: cargo test
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec biome ci .
+      - run: pnpm -r typecheck
+      - run: pnpm -r build
