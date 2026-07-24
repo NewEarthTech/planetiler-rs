@@ -2,8 +2,13 @@ import * as cdk from "aws-cdk-lib";
 import * as iam from "aws-cdk-lib/aws-iam";
 import { Construct } from "constructs";
 
-// Immutable GitHub ids, rename-proof: johncarmack1984 / planetiler-rs.
-const GITHUB_OWNER_ID = "20649979";
+// GitHub ids. The repo id (1286483378) is stable across renames AND transfers;
+// the OWNER id is NOT — it changes when a repo moves between accounts. It did on
+// the 2026-07-24 transfer from the johncarmack1984 user (20649979) to the
+// NewEarthTech org (147949794), which broke the OIDC trust (every deploy failed
+// at AssumeRoleWithWebIdentity) until this owner id and the plain-name claim
+// below were updated. Re-run `just ci::deploy` after any future transfer.
+const GITHUB_OWNER_ID = "147949794"; // NewEarthTech org
 const GITHUB_REPO_ID = "1286483378";
 
 /**
@@ -25,14 +30,14 @@ export class PlanetilerRsCiStack extends cdk.Stack {
           StringEquals: {
             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
           },
-          // This GitHub account emits customized, id-carrying subject claims
-          // (`repo:owner@ownerId/repo@repoId:ref:…`), so plain-name StringEquals
-          // trust fails at AssumeRoleWithWebIdentity. Match both the id form
-          // and the plain form, pinned to main.
+          // Match both subject forms, pinned to main: the default plain-name
+          // claim (`repo:owner/repo:ref:…`) that the NewEarthTech org emits, and
+          // the id-carrying form (`repo:owner@ownerId/repo@repoId:ref:…`) in case
+          // the org configures customized claims the way the old owner did.
           StringLike: {
             "token.actions.githubusercontent.com:sub": [
               `repo:*@${GITHUB_OWNER_ID}/*@${GITHUB_REPO_ID}:ref:refs/heads/main`,
-              "repo:johncarmack1984/planetiler-rs:ref:refs/heads/main",
+              "repo:NewEarthTech/planetiler-rs:ref:refs/heads/main",
             ],
           },
         },
