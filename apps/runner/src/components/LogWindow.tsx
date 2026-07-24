@@ -9,9 +9,10 @@ export function LogWindow({ lines, className }: { lines: LogLine[]; className?: 
 
   // Stick to the bottom while the user hasn't scrolled up.
   useEffect(() => {
+    if (lines.length === 0) return;
     const el = scrollRef.current;
     if (el && stuckRef.current) el.scrollTop = el.scrollHeight;
-  }, [lines]);
+  }, [lines.length]);
 
   return (
     <Card className={cn("overflow-hidden", className)}>
