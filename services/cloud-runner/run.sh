@@ -5,10 +5,10 @@
 # extract jobs, 14h for planet) so a wedged run can't idle for a weekend, and
 # shutdown means terminate.
 #
-# Usage: parity/cloud/run.sh <job> <ref-a> <ref-b> [rounds] [instance-type] [max-hours] [data-ebs-gb]
-#   e.g. parity/cloud/run.sh gb-ab main perf/parallel-merge
-#        parity/cloud/run.sh europe-ab main perf/parallel-merge 2 r7g.8xlarge 8 500
-#        parity/cloud/run.sh planet main
+# Usage: services/cloud-runner/run.sh <job> <ref-a> <ref-b> [rounds] [instance-type] [max-hours] [data-ebs-gb]
+#   e.g. services/cloud-runner/run.sh gb-ab main perf/parallel-merge
+#        services/cloud-runner/run.sh europe-ab main perf/parallel-merge 2 r7g.8xlarge 8 500
+#        services/cloud-runner/run.sh planet main
 # `d`-suffix instance types use their local NVMe for /data; for types without
 # instance store, pass data-ebs-gb to attach a gp3 data volume instead
 # (provisioned to 8000 IOPS / 500 MB/s so disk class doesn't dominate results).

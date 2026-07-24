@@ -22,7 +22,7 @@
 #      terminating, and keeps the box on any fetch failure (or on FAIL, so a
 #      walled probe can be re-dispatched onto the same warm box).
 #
-# Usage: parity/cloud/watch.sh <ip> [max-hours] [poll-seconds]
+# Usage: services/cloud-runner/watch.sh <ip> [max-hours] [poll-seconds]
 #   KEEP=1 in the environment leaves the box up even on a clean DONE.
 set -euo pipefail
 

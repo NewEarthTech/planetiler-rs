@@ -3,7 +3,7 @@
 # downloaded input, and the shared key/SG — after a remote.sh fix. Ships a
 # fresh bundle + runner, resets the boot failsafe clock, then polls, fetches
 # results, and terminates exactly like run.sh.
-# Usage: parity/cloud/redispatch.sh <ip> <job> <ref-a> <ref-b> [rounds] [max-hours]
+# Usage: services/cloud-runner/redispatch.sh <ip> <job> <ref-a> <ref-b> [rounds] [max-hours]
 set -euo pipefail
 
 IP=${1:?instance ip}
