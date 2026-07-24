@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # The build script compiles proto/vector_tile.proto.
-      - uses: arduino/setup-protoc@v3
+      - uses: rustfs/setup-protoc@v3.0.1
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
@@ -48,7 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # The build script compiles proto/vector_tile.proto.
-      - uses: arduino/setup-protoc@v3
+      - uses: rustfs/setup-protoc@v3.0.1
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
@@ -65,7 +65,7 @@ jobs:
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec biome ci .
