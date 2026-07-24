@@ -14,12 +14,9 @@ importers:
 
   apps/docs:
     dependencies:
-      '@base-ui-components/react':
-        specifier: 1.0.0-rc.0
-        version: 1.0.0-rc.0(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
-      clsx:
-        specifier: ^2.1.1
-        version: 2.1.1
+      '@planetiler-rs/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
       react:
         specifier: ^19.2.7
         version: 19.2.8
@@ -29,9 +26,6 @@ importers:
       recharts:
         specifier: ^3.6.0
         version: 3.10.0(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react-is@19.2.8)(react@19.2.8)(redux@5.0.1)
-      tailwind-merge:
-        specifier: ^3.6.0
-        version: 3.6.0
     devDependencies:
       '@tailwindcss/vite':
         specifier: ^4.3.1
@@ -57,6 +51,34 @@ importers:
       vite:
         specifier: ^8.1.0
         version: 8.1.5(@types/node@26.1.1)(jiti@2.7.0)
+
+  packages/ui:
+    dependencies:
+      '@base-ui-components/react':
+        specifier: 1.0.0-rc.0
+        version: 1.0.0-rc.0(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      clsx:
+        specifier: ^2.1.1
+        version: 2.1.1
+      react:
+        specifier: ^19.0.0
+        version: 19.2.8
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.8(react@19.2.8)
+      tailwind-merge:
+        specifier: ^3.6.0
+        version: 3.6.0
+    devDependencies:
+      '@types/react':
+        specifier: ^19.2.17
+        version: 19.2.17
+      '@types/react-dom':
+        specifier: ^19.2.3
+        version: 19.2.3(@types/react@19.2.17)
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
 
 packages:
 

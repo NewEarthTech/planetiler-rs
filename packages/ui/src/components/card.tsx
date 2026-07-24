@@ -1,4 +1,4 @@
-import { cn } from "@/lib/utils";
+import { cn } from "@planetiler-rs/ui/utils";
 
 export function Card({ className, ...props }: React.ComponentProps<"div">) {
   return (

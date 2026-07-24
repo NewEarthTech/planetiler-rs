@@ -1,5 +1,5 @@
 import { Collapsible } from "@base-ui-components/react/collapsible";
-import { cn } from "@/lib/utils";
+import { cn } from "@planetiler-rs/ui/utils";
 
 /** Fixed categorical assignment — color follows the entity, everywhere. */
 export const SERIES_COLOR = {

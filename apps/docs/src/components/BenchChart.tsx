@@ -7,8 +7,8 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { ChartTooltip, DataTable, LegendChips } from "@/components/chart";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@planetiler-rs/ui/card";
+import { ChartTooltip, DataTable, LegendChips } from "@planetiler-rs/ui/chart";
 
 export interface SeriesSpec {
   key: string;
