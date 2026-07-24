@@ -20,3 +20,7 @@ CLAUDE.local.md
 
 # Cloud benchmark run artifacts (fetched per run; curated numbers go to bench/results)
 services/cloud-runner/results/
+
+# JS workspace (pnpm): installs and app build output
+node_modules/
+/apps/*/dist/
