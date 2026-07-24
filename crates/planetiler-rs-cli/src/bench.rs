@@ -13,7 +13,7 @@
 //!
 //! Peak-RSS caveat: with mmap node stores, resident bytes understate true
 //! footprint, so the harness must report the storage mode alongside the number
-//! — see the fairness rules in `docs/ARCHITECTURE.md`.
+//! — see the fairness rules in `ARCHITECTURE.md`.
 
 use std::fmt;
 use std::process::Command;
