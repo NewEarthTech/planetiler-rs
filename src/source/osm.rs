@@ -18,6 +18,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
+use std::sync::mpsc;
 
 use geo::CoordsIter;
 use geo_types::{
@@ -361,12 +362,29 @@ struct WayBlock {
     features: Vec<SourceFeature>,
 }
 
-/// Read the file's blobs sequentially, decode windows of them across cores, and
-/// hand each block's extracted output to `consume` in file order. The heavy
-/// work (zlib + protobuf decode, tag/geometry extraction) runs in `decode` on
-/// rayon workers; `consume` stays serial and ordered, so node ids reach the
-/// store ascending and feature emission is deterministic. Memory is bounded by
-/// one window of decoded output.
+/// Read the file's blobs, decode windows of them across cores, and hand each
+/// block's extracted output to `consume` in file order. The heavy work (zlib +
+/// protobuf decode, tag/geometry extraction) runs in `decode` on rayon workers;
+/// `consume` stays serial and ordered, so node ids reach the store ascending
+/// and feature emission is deterministic.
+///
+/// Read and decode run on a **producer thread while this thread consumes the
+/// previous window**, so the decode burst no longer stalls behind the serial
+/// consume and vice-versa. The probe that motivated this measured the loop
+/// bulk-synchronous — pass 2 was `read + decode + consume` strictly in
+/// sequence, with the ~7.7 s decode simply added to a ~39 s consume it could
+/// have hidden under.
+///
+/// Ordering, and so byte-identity, is untouched: windows are produced in file
+/// order down a single channel and drained in order, so `consume` sees exactly
+/// the sequence it saw before.
+///
+/// Memory is unchanged too, by construction. A rendezvous channel (depth 0)
+/// keeps exactly one decoded window in flight beyond the one being consumed,
+/// and the window is halved to pay for it — so the resident decoded output is
+/// the same 64 blobs the bulk-synchronous loop held. That matters: the planet
+/// run's wall was RSS, so an overlap that bought throughput with footprint
+/// would be a bad trade here.
 fn for_each_block_parallel<T, D, C>(
     path: &Path,
     phase: &str,
@@ -378,69 +396,106 @@ where
     D: Fn(&PrimitiveBlock) -> T + Sync,
     C: FnMut(T) -> Result<()>,
 {
-    const WINDOW: usize = 64;
-    let mut reader = BlobReader::from_path(path).map_err(|e| Error::SourceDetail {
-        context: "cannot open OSM PBF",
-        message: e.to_string(),
-    })?;
-    // Probe: this loop is bulk-synchronous — a serial read of WINDOW blobs, a
-    // parallel decode burst, then a serial consume — with no overlap between the
-    // three. The planet run measured pass 2 at ~12% CPU (load 3.7 on 32 cores),
-    // so most of the wall is idle silicon; splitting it three ways names which
-    // serial phase starves the cores (read = I/O, consume = store writes + sink,
-    // decode = the actual parallel work) and so directs the fix. Three clock
-    // reads per 64-blob window are free; the totals log once per pass. Nothing
-    // here touches the feature stream, so output is byte-identical.
-    let mut read_time = std::time::Duration::ZERO;
-    let mut decode_time = std::time::Duration::ZERO;
-    let mut consume_time = std::time::Duration::ZERO;
-    let mut windows = 0u64;
-    let mut blocks = 0u64;
-    loop {
-        let t = std::time::Instant::now();
-        let window: Vec<Blob> = reader
-            .by_ref()
-            .take(WINDOW)
-            .collect::<std::result::Result<_, _>>()
-            .map_err(|e| Error::SourceDetail {
-                context: "failed to read OSM PBF",
+    // Halved from 64 to keep the two-windows-in-flight footprint equal to the
+    // one window the non-overlapped loop held.
+    const WINDOW: usize = 32;
+
+    let (tx, rx) = mpsc::sync_channel::<Vec<T>>(0);
+    let decode = &decode;
+
+    std::thread::scope(|scope| {
+        // Producer: read blobs serially, decode each window across the pool.
+        let producer = scope.spawn(move || -> Result<(f64, f64, u64, u64)> {
+            let mut reader = BlobReader::from_path(path).map_err(|e| Error::SourceDetail {
+                context: "cannot open OSM PBF",
                 message: e.to_string(),
             })?;
-        read_time += t.elapsed();
-        if window.is_empty() {
-            break;
+            let mut read_time = std::time::Duration::ZERO;
+            let mut decode_time = std::time::Duration::ZERO;
+            let mut windows = 0u64;
+            let mut blocks = 0u64;
+            loop {
+                let t = std::time::Instant::now();
+                let window: Vec<Blob> = reader
+                    .by_ref()
+                    .take(WINDOW)
+                    .collect::<std::result::Result<_, _>>()
+                    .map_err(|e| Error::SourceDetail {
+                        context: "failed to read OSM PBF",
+                        message: e.to_string(),
+                    })?;
+                read_time += t.elapsed();
+                if window.is_empty() {
+                    break;
+                }
+                let t = std::time::Instant::now();
+                let outputs: Vec<T> = window
+                    .par_iter()
+                    .map(|blob| match blob.decode() {
+                        Ok(BlobDecode::OsmData(block)) => Ok(Some(decode(&block))),
+                        Ok(_) => Ok(None),
+                        Err(e) => Err(Error::SourceDetail {
+                            context: "failed to decode OSM PBF block",
+                            message: e.to_string(),
+                        }),
+                    })
+                    .collect::<Result<Vec<Option<T>>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                decode_time += t.elapsed();
+                windows += 1;
+                blocks += window.len() as u64;
+                if tx.send(outputs).is_err() {
+                    // The consumer failed and hung up; its error is the one
+                    // worth reporting, so stop quietly and let it surface.
+                    break;
+                }
+            }
+            Ok((
+                read_time.as_secs_f64(),
+                decode_time.as_secs_f64(),
+                windows,
+                blocks,
+            ))
+        });
+
+        // Consumer (this thread): the serial, ordered sink.
+        let mut consume_time = std::time::Duration::ZERO;
+        let mut consume_result: Result<()> = Ok(());
+        while let Ok(outputs) = rx.recv() {
+            let t = std::time::Instant::now();
+            for output in outputs {
+                if let Err(e) = consume(output) {
+                    consume_result = Err(e);
+                    break;
+                }
+            }
+            consume_time += t.elapsed();
+            if consume_result.is_err() {
+                break;
+            }
         }
-        let t = std::time::Instant::now();
-        let outputs: Vec<Option<T>> = window
-            .par_iter()
-            .map(|blob| match blob.decode() {
-                Ok(BlobDecode::OsmData(block)) => Ok(Some(decode(&block))),
-                Ok(_) => Ok(None),
-                Err(e) => Err(Error::SourceDetail {
-                    context: "failed to decode OSM PBF block",
-                    message: e.to_string(),
-                }),
-            })
-            .collect::<Result<_>>()?;
-        decode_time += t.elapsed();
-        windows += 1;
-        blocks += window.len() as u64;
-        let t = std::time::Instant::now();
-        for output in outputs.into_iter().flatten() {
-            consume(output)?;
-        }
-        consume_time += t.elapsed();
-    }
-    tracing::info!(
-        phase,
-        read_s = read_time.as_secs_f64(),
-        decode_s = decode_time.as_secs_f64(),
-        consume_s = consume_time.as_secs_f64(),
-        windows,
-        blocks,
-        "block-parallel pass timing (probe)"
-    );
-    Ok(())
+        // Drop the receiver before joining so a producer blocked on `send`
+        // (which is every producer, at a rendezvous channel) can finish.
+        drop(rx);
+        let produced = producer.join().expect("OSM decode stage panicked");
+        consume_result?;
+        let (read_s, decode_s, windows, blocks) = produced?;
+        // Note these three no longer sum to the pass wall: read + decode now run
+        // concurrently with consume, which is the point. `consume_s` against the
+        // pass's own elapsed_s is what shows how much of the decode is hidden.
+        tracing::info!(
+            phase,
+            read_s,
+            decode_s,
+            consume_s = consume_time.as_secs_f64(),
+            windows,
+            blocks,
+            "block-parallel pass timing (probe)"
+        );
+        Ok(())
+    })
 }
 
 /// Build a tagged node's point feature with the osm-qa metadata attached.
