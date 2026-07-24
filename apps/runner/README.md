@@ -11,7 +11,7 @@ This is the UI shell — no backend is wired yet. Dispatch replays the first ful
 
 ## Deploy
 
-Live at <https://runner.johncarmack.com>. CI deploys on every push to `main` that touches the console or the shared web workspace (`.github/workflows/deploy.yml`, OIDC role from `infra/ci` — no AWS keys). Local fallback: `just deploy` in `infra/runner` (stack `RunnerConsoleStack`, mirrors the tilebench stack in `infra/docs`); `just diff` there previews. Local runs need default AWS creds and `infra/runner/.env` (see `.env.example` there).
+Live at <https://runner.johncarmack.com>. CI deploys on every push to `main` that touches the console or the shared web workspace (`.github/workflows/deploy.yml`, OIDC role from `infra/ci` — no AWS keys). Local fallback: `just runner::deploy` from anywhere in the repo (stack `RunnerConsoleStack`, mirrors the tilebench stack in `infra/docs`); `just runner::diff` previews. Local runs need default AWS creds and `infra/runner/.env` (see `.env.example` there).
 
 ## Roadmap
 
