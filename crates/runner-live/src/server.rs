@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Json, Response};
@@ -13,6 +13,7 @@ use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::cors::CorsLayer;
 
 use crate::auth::Auth;
 use crate::event::LogEvent;
@@ -26,9 +27,21 @@ const CLIENT_QUEUE: usize = 256;
 pub struct AppState {
     pub hub: Arc<RunHub>,
     pub auth: Arc<Auth>,
+    /// Origins allowed to call us from a browser — the console is a
+    /// different origin (runner. vs live.runner.), so every SPA request is
+    /// CORS, and the Authorization header makes it preflighted.
+    pub allowed_origins: Vec<HeaderValue>,
 }
 
 pub fn router(state: AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(state.allowed_origins.clone())
+        .allow_methods([Method::GET])
+        .allow_headers([
+            header::AUTHORIZATION,
+            HeaderName::from_static("last-event-id"),
+        ])
+        .max_age(Duration::from_secs(3600));
     let authed = Router::new()
         .route("/runs", get(list_runs))
         .route("/runs/{run}/events", get(events))
@@ -36,6 +49,8 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(async || "ok"))
         .merge(authed)
+        // Outermost so preflights are answered before auth sees them.
+        .layer(cors)
         .with_state(state)
 }
 
@@ -174,6 +189,7 @@ mod tests {
         AppState {
             hub,
             auth: Arc::new(Auth::Disabled),
+            allowed_origins: vec![HeaderValue::from_static("https://console.test")],
         }
     }
 
@@ -239,6 +255,58 @@ mod tests {
             "resumed stream repeated old lines: {body}"
         );
         assert!(body.contains("line 4") && body.contains("line 5"));
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_admits_the_console_origin_without_auth() {
+        let state = state_with_lines(1);
+        let addr = serve(state).await;
+        let client = reqwest::Client::new();
+        let res = client
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://{addr}/runs/r1/events"),
+            )
+            .header("origin", "https://console.test")
+            .header("access-control-request-method", "GET")
+            .header(
+                "access-control-request-headers",
+                "authorization,last-event-id",
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            res.status().is_success(),
+            "preflight failed: {}",
+            res.status()
+        );
+        let allow_origin = res
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(allow_origin, "https://console.test");
+        let allow_headers = res
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(allow_headers.contains("authorization") && allow_headers.contains("last-event-id"));
+        // An origin we don't trust gets no allow-origin back.
+        let other = client
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://{addr}/runs/r1/events"),
+            )
+            .header("origin", "https://evil.test")
+            .header("access-control-request-method", "GET")
+            .send()
+            .await
+            .unwrap();
+        assert!(other.headers().get("access-control-allow-origin").is_none());
     }
 
     #[tokio::test]

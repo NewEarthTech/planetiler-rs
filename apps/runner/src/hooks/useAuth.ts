@@ -10,6 +10,7 @@ import {
   type Session,
   signOut,
 } from "@/lib/auth";
+import type { LiveConfig } from "@/lib/live";
 
 export type AuthState =
   /** Resolving config / finishing the callback exchange. */
@@ -24,6 +25,8 @@ export type AuthState =
       /** Pool ids the live-runs client federates through. */
       userPoolProvider: string;
       runs: RunsConfig | null;
+      /** The SSE backend, when this deploy advertises one. */
+      live: LiveConfig | null;
     }
   | { status: "error"; message: string };
 
@@ -83,5 +86,6 @@ function signedIn(config: AppConfig, session: Session): AuthState {
     signOut: () => signOut(config.auth),
     userPoolProvider: `cognito-idp.${config.auth.region}.amazonaws.com/${config.auth.userPoolId}`,
     runs: config.runs,
+    live: config.live,
   };
 }

@@ -3,7 +3,7 @@ import { ThemeToggle } from "@planetiler-rs/ui/theme-toggle";
 import { useState } from "react";
 import { ActionBar } from "@/components/ActionBar";
 import { AuthErrorGate, SignInGate } from "@/components/AuthGate";
-import { LiveRun } from "@/components/LiveRun";
+import { LiveRun, LiveRunStream } from "@/components/LiveRun";
 import { LogWindow } from "@/components/LogWindow";
 import { PlanetGlobe } from "@/components/PlanetGlobe";
 import { ProgressPanel } from "@/components/ProgressPanel";
@@ -62,7 +62,11 @@ function Console({ auth }: { auth: Extract<AuthState, { status: "open" | "signed
       )}
 
       {live && selectedRun ? (
-        <LiveRun client={live.client} logGroup={live.logGroup} run={selectedRun} />
+        auth.status === "signed-in" && auth.live ? (
+          <LiveRunStream config={auth.live} idToken={auth.session.idToken} run={selectedRun} />
+        ) : (
+          <LiveRun client={live.client} logGroup={live.logGroup} run={selectedRun} />
+        )
       ) : (
         <DemoConsole />
       )}

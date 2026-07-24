@@ -18,6 +18,12 @@ const account = process.env.CDK_DEFAULT_ACCOUNT;
 cdk.Tags.of(app).add("Project", "planetiler-runner");
 cdk.Tags.of(app).add("ManagedBy", "cdk");
 
+// The SSE backend's domain, shared by both stacks: RunnerBackendStack serves
+// it, RunnerConsoleStack advertises it in config.json. Explicitly empty
+// ("" in .env or the workflow) disables the advert — the kill switch that
+// drops the console back to CloudWatch polling on the next deploy.
+const liveDomain = process.env.RUNNER_LIVE_DOMAIN ?? "live.runner.johncarmack.com";
+
 new RunnerConsoleStack(app, "RunnerConsoleStack", {
   // CloudFront and its ACM certificate must live in us-east-1.
   env: { account, region: "us-east-1" },
@@ -31,16 +37,17 @@ new RunnerConsoleStack(app, "RunnerConsoleStack", {
   samlMetadataUrl: process.env.RUNNER_SAML_METADATA_URL || undefined,
   // Only used before SAML is wired; defaults to the repo's commit author.
   ownerEmail: process.env.RUNNER_OWNER_EMAIL ?? "johncarmack@me.com",
+  liveUrl: liveDomain ? `https://${liveDomain}` : undefined,
 });
 
 // The SSE backend (#59). Only instantiated when the cross-built binary is
 // present, so console-only deploys never require a Rust build — the binary
 // comes from `just runner::build-backend` locally or the backend workflow.
 const backendBinary = path.join(__dirname, "..", "dist-backend", "runner-live");
-if (fs.existsSync(backendBinary)) {
+if (fs.existsSync(backendBinary) && liveDomain) {
   new RunnerBackendStack(app, "RunnerBackendStack", {
     env: { account, region: "us-east-1" },
-    domainName: process.env.RUNNER_LIVE_DOMAIN ?? "live.runner.johncarmack.com",
+    domainName: liveDomain,
     zoneName: process.env.RUNNER_ZONE_NAME ?? "johncarmack.com",
     zoneId: requireEnv("RUNNER_ZONE_ID"),
     binaryPath: backendBinary,
