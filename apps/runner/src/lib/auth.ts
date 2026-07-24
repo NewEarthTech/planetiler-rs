@@ -8,6 +8,8 @@
 // back through the hosted UI — a silent redirect while the AWS access portal
 // session is alive.
 
+import type { LiveConfig } from "@/lib/live";
+
 export interface AuthConfig {
   /** Hosted UI base URL, e.g. https://runner-johncarmack.auth.us-east-1.amazoncognito.com */
   domain: string;
@@ -29,6 +31,8 @@ export interface AppConfig {
   auth: AuthConfig;
   /** Absent on deploys older than the run-logs infra. */
   runs: RunsConfig | null;
+  /** The SSE backend (#59); absent when the deploy doesn't advertise one, in which case the live view falls back to CloudWatch polling. */
+  live: LiveConfig | null;
 }
 
 export interface Session {
@@ -55,7 +59,11 @@ export async function loadAppConfig(): Promise<AppConfig | null> {
     const res = await fetch("/config.json", { cache: "no-cache" });
     if (!res.ok) return null;
     const parsed: unknown = JSON.parse(await res.text());
-    const { auth, runs } = parsed as { auth?: Partial<AuthConfig>; runs?: Partial<RunsConfig> };
+    const { auth, runs, live } = parsed as {
+      auth?: Partial<AuthConfig>;
+      runs?: Partial<RunsConfig>;
+      live?: Partial<LiveConfig>;
+    };
     if (!auth || typeof auth.domain !== "string" || typeof auth.clientId !== "string") {
       return null;
     }
@@ -74,6 +82,7 @@ export async function loadAppConfig(): Promise<AppConfig | null> {
         typeof runs.identityPoolId === "string"
           ? { region: runs.region, logGroup: runs.logGroup, identityPoolId: runs.identityPoolId }
           : null,
+      live: live && typeof live.url === "string" && live.url ? { url: live.url } : null,
     };
   } catch {
     return null;

@@ -51,6 +51,15 @@ struct Args {
     client_id: Option<String>,
     #[arg(long, env = "RUNNER_LIVE_AUTH_REGION")]
     auth_region: Option<String>,
+    /// Browser origins allowed by CORS: the console's origin plus the Vite
+    /// dev server (mirrors the localhost callback on the Cognito client).
+    #[arg(
+        long,
+        env = "RUNNER_LIVE_ALLOWED_ORIGINS",
+        default_value = "https://runner.johncarmack.com,http://localhost:5173",
+        value_delimiter = ','
+    )]
+    allowed_origins: Vec<String>,
     /// Serve without auth — local dev only.
     #[arg(long)]
     no_auth: bool,
@@ -115,9 +124,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let allowed_origins = args
+        .allowed_origins
+        .iter()
+        .map(|origin| origin.parse())
+        .collect::<Result<Vec<_>, _>>()
+        .context("--allowed-origins: not a valid header value")?;
     let state = AppState {
         hub,
         auth: Arc::new(auth),
+        allowed_origins,
     };
     let listener = tokio::net::TcpListener::bind(&args.listen)
         .await

@@ -49,6 +49,12 @@ export interface RunnerConsoleStackProps extends cdk.StackProps {
   samlMetadataUrl?: string;
   /** Owner of the single Cognito-local user used before SAML is wired. */
   ownerEmail: string;
+  /**
+   * Base URL of the runner-live SSE backend (RunnerBackendStack), advertised
+   * to the SPA via config.json. Unset = the live view falls back to direct
+   * CloudWatch polling — the kill switch if the backend misbehaves.
+   */
+  liveUrl?: string;
 }
 
 /**
@@ -275,6 +281,7 @@ export class RunnerConsoleStack extends cdk.Stack {
             logGroup: RUN_LOG_GROUP,
             identityPoolId: identityPool.identityPoolId,
           },
+          ...(props.liveUrl ? { live: { url: props.liveUrl } } : {}),
         }),
       ],
       destinationBucket: bucket,

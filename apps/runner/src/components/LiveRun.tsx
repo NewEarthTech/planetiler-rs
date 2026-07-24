@@ -4,8 +4,10 @@ import { cn } from "@planetiler-rs/ui/utils";
 import { LogWindow } from "@/components/LogWindow";
 import { PlanetGlobe } from "@/components/PlanetGlobe";
 import { ProgressPanel } from "@/components/ProgressPanel";
-import { type LiveStatus, useLiveRun } from "@/hooks/useLiveRun";
+import { type LiveRun as LiveRunData, type LiveStatus, useLiveRun } from "@/hooks/useLiveRun";
+import { useLiveRunSse } from "@/hooks/useLiveRunSse";
 import type { RunState } from "@/lib/feed";
+import type { LiveConfig } from "@/lib/live";
 import type { RunSummary } from "@/lib/runs";
 
 const STATUS_CHIP: Record<
@@ -32,9 +34,25 @@ interface LiveRunProps {
   run: RunSummary;
 }
 
-/** A cloud run, tailed live out of CloudWatch Logs. */
+/** A cloud run, tailed by polling CloudWatch Logs — the fallback path when the deploy has no SSE backend. */
 export function LiveRun({ client, logGroup, run }: LiveRunProps) {
   const live = useLiveRun(client, logGroup, run);
+  return <LiveRunView run={run} live={live} />;
+}
+
+interface LiveRunStreamProps {
+  config: LiveConfig;
+  idToken: string;
+  run: RunSummary;
+}
+
+/** A cloud run, streamed line-by-line over SSE from the runner-live backend. */
+export function LiveRunStream({ config, idToken, run }: LiveRunStreamProps) {
+  const live = useLiveRunSse(config, idToken, run);
+  return <LiveRunView run={run} live={live} />;
+}
+
+function LiveRunView({ run, live }: { run: RunSummary; live: LiveRunData }) {
   const chip = STATUS_CHIP[live.status];
   return (
     <>
