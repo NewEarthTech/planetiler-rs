@@ -24,21 +24,31 @@ cdk.Tags.of(app).add("ManagedBy", "cdk");
 // drops the console back to CloudWatch polling on the next deploy.
 const liveDomain = process.env.RUNNER_LIVE_DOMAIN ?? "live.runner.johncarmack.com";
 
-new RunnerConsoleStack(app, "RunnerConsoleStack", {
-  // CloudFront and its ACM certificate must live in us-east-1.
-  env: { account, region: "us-east-1" },
-  domainName: process.env.RUNNER_DOMAIN ?? "runner.johncarmack.com",
-  zoneName: process.env.RUNNER_ZONE_NAME ?? "johncarmack.com",
-  // The parent hosted zone id, from infra/runner/.env (kept out of the repo).
-  zoneId: requireEnv("RUNNER_ZONE_ID"),
-  authDomainPrefix: process.env.RUNNER_AUTH_DOMAIN_PREFIX ?? "runner-johncarmack",
-  // Empty and unset both mean "not wired yet" (CI passes the repo variable
-  // through even when it is blank).
-  samlMetadataUrl: process.env.RUNNER_SAML_METADATA_URL || undefined,
-  // Only used before SAML is wired; defaults to the repo's commit author.
-  ownerEmail: process.env.RUNNER_OWNER_EMAIL ?? "johncarmack@me.com",
-  liveUrl: liveDomain ? `https://${liveDomain}` : undefined,
-});
+// Each stack only instantiates when its build artifact exists, because
+// synthesizing this app synthesizes every stack in it: the backend workflow
+// deploys RunnerBackendStack without ever building the console bundle, and
+// console deploys don't cross-build the Rust binary. Missing artifact =
+// that stack is simply absent from this synth, with a warning.
+const consoleDist = path.join(__dirname, "..", "..", "..", "apps", "runner", "dist");
+if (fs.existsSync(consoleDist)) {
+  new RunnerConsoleStack(app, "RunnerConsoleStack", {
+    // CloudFront and its ACM certificate must live in us-east-1.
+    env: { account, region: "us-east-1" },
+    domainName: process.env.RUNNER_DOMAIN ?? "runner.johncarmack.com",
+    zoneName: process.env.RUNNER_ZONE_NAME ?? "johncarmack.com",
+    // The parent hosted zone id, from infra/runner/.env (kept out of the repo).
+    zoneId: requireEnv("RUNNER_ZONE_ID"),
+    authDomainPrefix: process.env.RUNNER_AUTH_DOMAIN_PREFIX ?? "runner-johncarmack",
+    // Empty and unset both mean "not wired yet" (CI passes the repo variable
+    // through even when it is blank).
+    samlMetadataUrl: process.env.RUNNER_SAML_METADATA_URL || undefined,
+    // Only used before SAML is wired; defaults to the repo's commit author.
+    ownerEmail: process.env.RUNNER_OWNER_EMAIL ?? "johncarmack@me.com",
+    liveUrl: liveDomain ? `https://${liveDomain}` : undefined,
+  });
+} else {
+  console.warn(`skipping RunnerConsoleStack: ${consoleDist} not found (just runner::build)`);
+}
 
 // The SSE backend (#59). Only instantiated when the cross-built binary is
 // present, so console-only deploys never require a Rust build — the binary
