@@ -23,6 +23,12 @@ new RunnerConsoleStack(app, "RunnerConsoleStack", {
   zoneName: process.env.RUNNER_ZONE_NAME ?? "johncarmack.com",
   // The parent hosted zone id, from infra/runner/.env (kept out of the repo).
   zoneId: requireEnv("RUNNER_ZONE_ID"),
+  authDomainPrefix: process.env.RUNNER_AUTH_DOMAIN_PREFIX ?? "runner-johncarmack",
+  // Empty and unset both mean "not wired yet" (CI passes the repo variable
+  // through even when it is blank).
+  samlMetadataUrl: process.env.RUNNER_SAML_METADATA_URL || undefined,
+  // Only used before SAML is wired; defaults to the repo's commit author.
+  ownerEmail: process.env.RUNNER_OWNER_EMAIL ?? "johncarmack@me.com",
 });
 
 function requireEnv(name: string): string {

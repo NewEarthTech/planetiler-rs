@@ -1,11 +1,22 @@
+import { Button } from "@planetiler-rs/ui/button";
 import { ThemeToggle } from "@planetiler-rs/ui/theme-toggle";
 import { ActionBar } from "@/components/ActionBar";
+import { AuthErrorGate, SignInGate } from "@/components/AuthGate";
 import { LogWindow } from "@/components/LogWindow";
 import { PlanetGlobe } from "@/components/PlanetGlobe";
 import { ProgressPanel } from "@/components/ProgressPanel";
+import { type AuthState, useAuth } from "@/hooks/useAuth";
 import { useDemoRun } from "@/hooks/useDemoRun";
 
 export default function App() {
+  const auth = useAuth();
+  if (auth.status === "loading") return null;
+  if (auth.status === "error") return <AuthErrorGate message={auth.message} />;
+  if (auth.status === "signed-out") return <SignInGate onSignIn={auth.signIn} />;
+  return <Console auth={auth} />;
+}
+
+function Console({ auth }: { auth: Extract<AuthState, { status: "open" | "signed-in" }> }) {
   const run = useDemoRun();
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
@@ -18,7 +29,21 @@ export default function App() {
             build from its recorded log.
           </p>
         </div>
-        <ThemeToggle storageKey="runner-theme" />
+        <div className="flex items-center gap-2">
+          {auth.status === "signed-in" && (
+            <>
+              {auth.session.email && (
+                <span className="hidden text-xs text-ink-secondary sm:inline">
+                  {auth.session.email}
+                </span>
+              )}
+              <Button variant="ghost" onClick={auth.signOut}>
+                Sign out
+              </Button>
+            </>
+          )}
+          <ThemeToggle storageKey="runner-theme" />
+        </div>
       </header>
 
       <ActionBar
