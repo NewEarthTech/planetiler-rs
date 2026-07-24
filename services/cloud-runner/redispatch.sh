@@ -63,7 +63,7 @@ echo "== reset previous job + failsafe clock"
 # old run first, so nothing holds these open (clearing them mid-run would
 # orphan a live writer's inode instead).
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-  'pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; sleep 2; rm -rf status job.log repo planet-mem.log planet-rs.stderr; sudo shutdown -c 2>/dev/null; true'
+  'pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; pkill -f "\./drain\.sh" 2>/dev/null; sleep 2; rm -rf status job.log repo planet-mem.log planet-rs.stderr drain.log; sudo shutdown -c 2>/dev/null; true'
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" "sudo shutdown -h +$((MAX_HOURS * 60)) >/dev/null 2>&1"
 
 echo "== ship repo bundle + runner"
@@ -78,6 +78,15 @@ RUNNER=remote.sh
 [ "$JOB" = planet ] && RUNNER=remote-planet.sh
 scp -q "${SSH_OPTS[@]}" "$HERE/$RUNNER" "ubuntu@$IP:$RUNNER"
 rm -f "$BUNDLE"
+
+# Fresh live-console drain for the fresh run. Started unconditionally: without
+# box credentials (no instance profile at launch) it gives up quietly, and the
+# job never depends on it either way.
+RUN_ID="$JOB-$(date -u +%Y%m%d-%H%M%S)"
+scp -q "${SSH_OPTS[@]}" "$HERE/drain.sh" "ubuntu@$IP:drain.sh"
+ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
+  "chmod +x drain.sh && nohup ./drain.sh '$RUN_ID' > drain.log 2>&1 < /dev/null & echo 'drain started'"
+echo "live console: https://runner.johncarmack.com (run $RUN_ID)"
 
 if [ "$JOB" = planet ]; then
   echo "== start job: planet $REF_A"

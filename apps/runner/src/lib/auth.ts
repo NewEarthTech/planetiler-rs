@@ -18,6 +18,19 @@ export interface AuthConfig {
   identityProvider: string;
 }
 
+/** Where the live run logs live; published in config.json by the CDK stack. */
+export interface RunsConfig {
+  region: string;
+  logGroup: string;
+  identityPoolId: string;
+}
+
+export interface AppConfig {
+  auth: AuthConfig;
+  /** Absent on deploys older than the run-logs infra. */
+  runs: RunsConfig | null;
+}
+
 export interface Session {
   idToken: string;
   accessToken: string;
@@ -33,25 +46,34 @@ const SESSION_KEY = "runner-auth-session";
 const EXPIRY_SKEW_MS = 60_000;
 
 /**
- * Fetch /config.json and return its auth block, or null when it's missing or
- * not JSON (the SPA-fallback CloudFront config answers unknown paths with
- * index.html, so a missing file arrives as HTML with status 200).
+ * Fetch /config.json and return its auth + runs blocks, or null when it's
+ * missing or not JSON (the SPA-fallback CloudFront config answers unknown
+ * paths with index.html, so a missing file arrives as HTML with status 200).
  */
-export async function loadAuthConfig(): Promise<AuthConfig | null> {
+export async function loadAppConfig(): Promise<AppConfig | null> {
   try {
     const res = await fetch("/config.json", { cache: "no-cache" });
     if (!res.ok) return null;
     const parsed: unknown = JSON.parse(await res.text());
-    const auth = (parsed as { auth?: Partial<AuthConfig> }).auth;
+    const { auth, runs } = parsed as { auth?: Partial<AuthConfig>; runs?: Partial<RunsConfig> };
     if (!auth || typeof auth.domain !== "string" || typeof auth.clientId !== "string") {
       return null;
     }
     return {
-      domain: auth.domain,
-      clientId: auth.clientId,
-      userPoolId: auth.userPoolId ?? "",
-      region: auth.region ?? "",
-      identityProvider: auth.identityProvider ?? "",
+      auth: {
+        domain: auth.domain,
+        clientId: auth.clientId,
+        userPoolId: auth.userPoolId ?? "",
+        region: auth.region ?? "",
+        identityProvider: auth.identityProvider ?? "",
+      },
+      runs:
+        runs &&
+        typeof runs.region === "string" &&
+        typeof runs.logGroup === "string" &&
+        typeof runs.identityPoolId === "string"
+          ? { region: runs.region, logGroup: runs.logGroup, identityPoolId: runs.identityPoolId }
+          : null,
     };
   } catch {
     return null;

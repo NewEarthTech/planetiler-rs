@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import {
-  type AuthConfig,
+  type AppConfig,
   beginSignIn,
   CALLBACK_PATH,
   completeSignIn,
-  loadAuthConfig,
+  loadAppConfig,
   loadSession,
+  type RunsConfig,
   type Session,
   signOut,
 } from "@/lib/auth";
@@ -16,7 +17,14 @@ export type AuthState =
   /** No auth wiring (plain `pnpm dev` without a local config.json). */
   | { status: "open" }
   | { status: "signed-out"; signIn: () => void }
-  | { status: "signed-in"; session: Session; signOut: () => void }
+  | {
+      status: "signed-in";
+      session: Session;
+      signOut: () => void;
+      /** Pool ids the live-runs client federates through. */
+      userPoolProvider: string;
+      runs: RunsConfig | null;
+    }
   | { status: "error"; message: string };
 
 /**
@@ -34,7 +42,7 @@ export function useAuth(): AuthState {
     };
 
     (async () => {
-      const config = await loadAuthConfig();
+      const config = await loadAppConfig();
       if (!config) {
         apply(
           import.meta.env.DEV
@@ -45,7 +53,7 @@ export function useAuth(): AuthState {
       }
       if (location.pathname === CALLBACK_PATH) {
         try {
-          apply(signedIn(config, await completeSignIn(config)));
+          apply(signedIn(config, await completeSignIn(config.auth)));
         } catch (err) {
           history.replaceState(null, "", "/");
           apply({ status: "error", message: err instanceof Error ? err.message : String(err) });
@@ -56,7 +64,7 @@ export function useAuth(): AuthState {
       apply(
         session
           ? signedIn(config, session)
-          : { status: "signed-out", signIn: () => void beginSignIn(config) },
+          : { status: "signed-out", signIn: () => void beginSignIn(config.auth) },
       );
     })();
 
@@ -68,6 +76,12 @@ export function useAuth(): AuthState {
   return state;
 }
 
-function signedIn(config: AuthConfig, session: Session): AuthState {
-  return { status: "signed-in", session, signOut: () => signOut(config) };
+function signedIn(config: AppConfig, session: Session): AuthState {
+  return {
+    status: "signed-in",
+    session,
+    signOut: () => signOut(config.auth),
+    userPoolProvider: `cognito-idp.${config.auth.region}.amazonaws.com/${config.auth.userPoolId}`,
+    runs: config.runs,
+  };
 }

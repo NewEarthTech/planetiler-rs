@@ -1,6 +1,6 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@planetiler-rs/ui/card";
 import { cn, fmtDuration } from "@planetiler-rs/ui/utils";
-import type { Counters, RunState } from "@/hooks/useDemoRun";
+import type { Counters, RunState } from "@/lib/feed";
 import { PHASES, TOTAL_S } from "@/lib/phases";
 
 interface ProgressPanelProps {
@@ -9,6 +9,7 @@ interface ProgressPanelProps {
   simElapsedS: number;
   phaseDone: Record<string, number>;
   counters: Counters;
+  description?: string;
 }
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
@@ -29,16 +30,14 @@ export function ProgressPanel({
   simElapsedS,
   phaseDone,
   counters,
+  description = "planet-260713 (93.9 GB) · r7gd.8xlarge · z12 full build — demo replays the 2026-07-22 run at 120×",
 }: ProgressPanelProps) {
   const started = state === "running" || state === "done" || state === "cancelled";
   return (
     <Card className={className}>
       <CardHeader>
         <CardTitle>Run progress</CardTitle>
-        <CardDescription>
-          planet-260713 (93.9 GB) · r7gd.8xlarge · z12 full build — demo replays the 2026-07-22 run
-          at 120×
-        </CardDescription>
+        <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div className="flex h-2 w-full gap-0.5 overflow-hidden rounded-full">

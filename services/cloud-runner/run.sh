@@ -78,6 +78,21 @@ fi
 AWS ec2 authorize-security-group-ingress --group-id "$SG" \
   --protocol tcp --port 22 --cidr "$MYIP/32" >/dev/null 2>&1 || true
 
+echo "== live-console drain (instance profile, when RunnerConsoleStack is deployed)"
+# The runner console's stack (infra/runner) creates this profile: write-only
+# access to the run log group. Boxes launched without it still bench fine —
+# there is just no live view, and the drain on the box gives up quietly.
+DRAIN_PROFILE=planetiler-rs-bench-box
+DRAIN_GROUP=/planetiler-rs/runs
+DRAIN_REGION=us-east-1
+PROFILE_ARGS=()
+if aws iam get-instance-profile --instance-profile-name "$DRAIN_PROFILE" >/dev/null 2>&1; then
+  PROFILE_ARGS=(--iam-instance-profile "Name=$DRAIN_PROFILE")
+  echo "profile: $DRAIN_PROFILE"
+else
+  echo "no $DRAIN_PROFILE instance profile — run proceeds without the live console"
+fi
+
 echo "== launch $INSTANCE_TYPE"
 USER_DATA="#!/bin/bash
 shutdown -h +$((MAX_HOURS * 60))
@@ -98,11 +113,13 @@ if [ "$DATA_EBS_GB" -gt 0 ]; then
   MAPPINGS="$MAPPINGS DeviceName=/dev/sdb,Ebs={VolumeSize=$DATA_EBS_GB,VolumeType=gp3,Iops=8000,Throughput=500,DeleteOnTermination=true}"
 fi
 # shellcheck disable=SC2086
+# (macOS bash 3.2 treats "${empty[@]}" as unbound under set -u, hence the guard)
 IID=$(AWS ec2 run-instances \
   --image-id "$AMI" --instance-type "$INSTANCE_TYPE" \
   --key-name "$NAME" --security-group-ids "$SG" \
   --instance-initiated-shutdown-behavior terminate \
   --block-device-mappings $MAPPINGS \
+  ${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"} \
   --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=$NAME},{Key=job,Value=$JOB}]" \
   --user-data "$USER_DATA" \
   --query 'Instances[0].InstanceId' --output text)
@@ -145,6 +162,18 @@ scp -q "${SSH_OPTS[@]}" "$HERE/$RUNNER" "ubuntu@$IP:$RUNNER"
 [ "$JOB" = planet ] && scp -q "${SSH_OPTS[@]}" "$HERE/tiles-delta.sh" "ubuntu@$IP:tiles-delta.sh"
 rm -f "$BUNDLE"
 
+# Start the live-console drain before the job so job.log ships from its first
+# line. Purely additive: its own nohup'd process, and the job never waits on it.
+RUN_ID="$JOB-$(date -u +%Y%m%d-%H%M%S)"
+LIVE_HINT="(disabled — no $DRAIN_PROFILE profile)"
+if [ "${#PROFILE_ARGS[@]}" -gt 0 ]; then
+  scp -q "${SSH_OPTS[@]}" "$HERE/drain.sh" "ubuntu@$IP:drain.sh"
+  ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
+    "chmod +x drain.sh && nohup env DRAIN_GROUP='$DRAIN_GROUP' DRAIN_REGION='$DRAIN_REGION' ./drain.sh '$RUN_ID' > drain.log 2>&1 < /dev/null & echo 'drain started'"
+  LIVE_HINT="https://runner.johncarmack.com (run $RUN_ID)"
+  echo "live console: $LIVE_HINT"
+fi
+
 # nohup with stdin still attached leaves the dispatching ssh hanging; the
 # `< /dev/null` is load-bearing, not decoration.
 if [ "$JOB" = planet ]; then
@@ -162,6 +191,7 @@ if [ "$JOB" = planet ]; then
   failsafe: self-terminates ${MAX_HOURS}h after boot, shutdown = terminate
 
   watch + collect:  $HERE/watch.sh $IP $MAX_HOURS
+  watch live:       $LIVE_HINT
   peek at the log:  ssh -i $KEY_FILE ubuntu@$IP 'tail -f job.log'
   kill it now:      aws --region $REGION ec2 terminate-instances --instance-ids $IID
 

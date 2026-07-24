@@ -3,7 +3,17 @@ import { cn } from "@planetiler-rs/ui/utils";
 import { useEffect, useRef } from "react";
 import type { LogLine } from "@/lib/log";
 
-export function LogWindow({ lines, className }: { lines: LogLine[]; className?: string }) {
+export function LogWindow({
+  lines,
+  className,
+  title = "planet-rs.stderr",
+  emptyText = "No run in flight — requisition a box and dispatch the job to replay the planet demo.",
+}: {
+  lines: LogLine[];
+  className?: string;
+  title?: string;
+  emptyText?: string;
+}) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const stuckRef = useRef(true);
 
@@ -17,7 +27,7 @@ export function LogWindow({ lines, className }: { lines: LogLine[]; className?: 
   return (
     <Card className={cn("overflow-hidden", className)}>
       <div className="flex items-center justify-between border-b border-grid px-4 py-2">
-        <span className="font-mono text-xs text-ink-secondary">planet-rs.stderr</span>
+        <span className="font-mono text-xs text-ink-secondary">{title}</span>
         <span className="tabular text-xs text-ink-muted">
           {lines.length > 0 ? `${lines.length} lines` : "idle"}
         </span>
@@ -31,9 +41,7 @@ export function LogWindow({ lines, className }: { lines: LogLine[]; className?: 
         className="h-80 overflow-auto px-4 py-2 font-mono text-xs leading-relaxed"
       >
         {lines.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-ink-muted">
-            No run in flight — requisition a box and dispatch the job to replay the planet demo.
-          </div>
+          <div className="flex h-full items-center justify-center text-ink-muted">{emptyText}</div>
         ) : (
           lines.map((line, i) => (
             <div
