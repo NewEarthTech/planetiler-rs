@@ -31,6 +31,12 @@ export const BENCH_BOX_PROFILE = "planetiler-rs-bench-box";
  * by this exact ARN without a cross-stack import.
  */
 export const BENCH_IMAGE_REPO = "planetiler-rs-bench";
+/**
+ * Bucket the job scripts ship `results/` + final logs to before a box dies
+ * (`remote.sh`/`remote-planet.sh` reference it from bash, hence fixed). The
+ * collection path for console-dispatched boxes, which have no ssh for scp.
+ */
+export const RUN_RESULTS_BUCKET = "planetiler-rs-run-results";
 
 export interface RunnerConsoleStackProps extends cdk.StackProps {
   /** Fully-qualified domain the console is served from. */
@@ -211,6 +217,39 @@ export class RunnerConsoleStack extends cdk.Stack {
     });
 
     // -----------------------------------------------------------------
+    // Run results: the job scripts upload results/ + final logs to a
+    // run-keyed prefix before the box terminates — the collection path
+    // for console-dispatched boxes (no ssh, so no scp home). The bucket
+    // is a transfer buffer, not the record: numbers that matter land in
+    // bench/results/ in git, so objects expire with the log group's
+    // retention and the bucket is disposable with the stack.
+    // -----------------------------------------------------------------
+    const resultsBucket = new s3.Bucket(this, "RunResults", {
+      bucketName: RUN_RESULTS_BUCKET,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      lifecycleRules: [{ expiration: cdk.Duration.days(90) }],
+      // The signed-in console fetches result objects from the browser
+      // with identity-pool credentials; same localhost pair as the auth
+      // callbacks so `pnpm dev` works against real runs.
+      cors: [
+        {
+          allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.HEAD],
+          allowedOrigins: [`https://${props.domainName}`, "http://localhost:5173"],
+          allowedHeaders: ["*"],
+        },
+      ],
+    });
+    boxRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:PutObject"],
+        resources: [resultsBucket.arnForObjects("*")],
+      }),
+    );
+
+    // -----------------------------------------------------------------
     // Runner image registry: CI (image.yml) builds the release CLI and
     // pushes it here on merges to main; a console-dispatched bench box
     // pulls it instead of compiling from source. Push access lives on
@@ -247,6 +286,20 @@ export class RunnerConsoleStack extends cdk.Stack {
         resources: groupArns,
       }),
     );
+    // Read-only on the results prefix tree, so the console can list a
+    // finished run's artifacts and offer downloads.
+    identityPool.authenticatedRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:GetObject"],
+        resources: [resultsBucket.arnForObjects("*")],
+      }),
+    );
+    identityPool.authenticatedRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:ListBucket"],
+        resources: [resultsBucket.bucketArn],
+      }),
+    );
 
     const target = route53.RecordTarget.fromAlias(
       new targets.CloudFrontTarget(distribution),
@@ -280,6 +333,7 @@ export class RunnerConsoleStack extends cdk.Stack {
             region: this.region,
             logGroup: RUN_LOG_GROUP,
             identityPoolId: identityPool.identityPoolId,
+            resultsBucket: RUN_RESULTS_BUCKET,
           },
           ...(props.liveUrl ? { live: { url: props.liveUrl } } : {}),
         }),
@@ -300,6 +354,7 @@ export class RunnerConsoleStack extends cdk.Stack {
       description: "docker pull <this>:<sha> on a dispatched bench box",
       value: imageRepo.repositoryUri,
     });
+    new cdk.CfnOutput(this, "RunResultsBucket", { value: resultsBucket.bucketName });
     new cdk.CfnOutput(this, "IdentityPoolId", { value: identityPool.identityPoolId });
     // For configuring the Identity Center SAML app (README → Auth).
     new cdk.CfnOutput(this, "SamlAcsUrl", {

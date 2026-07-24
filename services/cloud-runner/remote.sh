@@ -12,10 +12,37 @@ ROUNDS=${4:-3}
 
 cd "$HOME"
 echo RUNNING > status
+
+# Ship results/ + the job log to a run-keyed S3 prefix before the box dies —
+# the collection path for a console-dispatched box, which has no ssh for the
+# laptop pollers to scp from (#59). Runs on FAIL too: a failed run's logs are
+# the valuable part. Best-effort by design: no RUN_ID in the dispatch env (an
+# old-style dispatch) or no instance profile and the job's outcome is
+# unchanged — the laptop path still collects by scp either way.
+ship_results() {
+  [ -n "${RUN_ID:-}" ] || return 0
+  # aws via snap, same reasoning as drain.sh (apt may not own the box's
+  # locks). `|| true` so a failed install can't errexit the EXIT trap.
+  command -v aws >/dev/null || sudo snap install aws-cli --classic >/dev/null 2>&1 || true
+  command -v aws >/dev/null || { echo "no aws cli; results stay on the box"; return 0; }
+  local dest="s3://${RESULTS_BUCKET:-planetiler-rs-run-results}/$RUN_ID"
+  local S3=(aws --region "${RESULTS_REGION:-us-east-1}" s3 cp --no-progress)
+  if [ -d results ] && "${S3[@]}" --recursive results/ "$dest/results/" >/dev/null 2>&1; then
+    echo "results shipped: $dest/results/"
+  else
+    echo "results ship to $dest failed (no instance profile?)"
+  fi
+  # Last, so the copy holds every line above; the drain has the rest.
+  "${S3[@]}" job.log "$dest/job.log" >/dev/null 2>&1 || true
+}
+
 # On any exit that didn't reach DONE — set -e failure, explicit exit 1, signal
 # — mark FAIL so the laptop-side poller stops instead of watching RUNNING
 # forever.
-finalize() { [ "$(cat status 2>/dev/null)" = DONE ] || echo FAIL > status; }
+finalize() {
+  [ "$(cat status 2>/dev/null)" = DONE ] || echo FAIL > status
+  ship_results
+}
 trap finalize EXIT
 
 # Job selects the input and how identity is proven. Big inputs skip the two

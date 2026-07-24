@@ -1,11 +1,12 @@
 # syntax=docker/dockerfile:1
 #
-# Runner image for planetiler-rs cloud dispatch: the release CLI on a minimal
-# glibc base, nothing else. Built and pushed to ECR (`planetiler-rs-bench`) by
-# .github/workflows/image.yml on merges to main; a console-dispatched bench box
-# will `docker pull` this instead of compiling from source on the box the way
-# services/cloud-runner/remote*.sh do today. arm64 only — the bench boxes are
-# Graviton (r7g/r7gd), and the image workflow builds it natively there.
+# Runner image for planetiler-rs cloud dispatch: the release CLI plus the
+# box-side job scripts on a minimal glibc base, nothing else. Built and pushed
+# to ECR (`planetiler-rs-bench`) by .github/workflows/image.yml on merges to
+# main; a console-dispatched bench box will `docker pull` this instead of
+# compiling from source on the box the way services/cloud-runner/remote*.sh do
+# today. arm64 only — the bench boxes are Graviton (r7g/r7gd), and the image
+# workflow builds it natively there.
 #
 # The build context is the repo root, so build.rs finds the cargo workspace and
 # the vendored proto:  docker build -f services/cloud-runner/Dockerfile .
@@ -36,5 +37,16 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /usr/local/bin/planetiler-rs /usr/local/bin/planetiler-rs
+# The box-side job scripts ride next to the CLI so they version with the image
+# sha instead of traveling from a laptop working tree by scp (#59). The scripts
+# run on the HOST, not in the container (they mount /data, apt-get, sudo): a
+# console-dispatched box lifts them out with
+#   c=$(docker create <image>) && docker cp "$c:/opt/cloud-runner/." "$HOME" && docker rm "$c"
+# The laptop-side dispatchers (run.sh, watch.sh, redispatch.sh) stay out — they
+# never run on a box.
+COPY services/cloud-runner/remote.sh \
+     services/cloud-runner/remote-planet.sh \
+     services/cloud-runner/tiles-delta.sh \
+     services/cloud-runner/drain.sh /opt/cloud-runner/
 ENTRYPOINT ["planetiler-rs"]
 CMD ["--help"]
