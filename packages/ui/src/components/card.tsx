@@ -3,10 +3,7 @@ import { cn } from "@planetiler-rs/ui/utils";
 export function Card({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
-      className={cn(
-        "rounded-xl border border-ring-hairline bg-surface shadow-sm",
-        className,
-      )}
+      className={cn("rounded-xl border border-ring-hairline bg-surface shadow-sm", className)}
       {...props}
     />
   );
@@ -17,9 +14,7 @@ export function CardHeader({ className, ...props }: React.ComponentProps<"div">)
 }
 
 export function CardTitle({ className, ...props }: React.ComponentProps<"h3">) {
-  return (
-    <h3 className={cn("text-sm font-semibold tracking-tight", className)} {...props} />
-  );
+  return <h3 className={cn("text-sm font-semibold tracking-tight", className)} {...props} />;
 }
 
 export function CardDescription({ className, ...props }: React.ComponentProps<"p">) {

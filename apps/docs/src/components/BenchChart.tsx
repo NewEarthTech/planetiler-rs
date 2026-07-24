@@ -1,3 +1,5 @@
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@planetiler-rs/ui/card";
+import { ChartTooltip, DataTable, LegendChips } from "@planetiler-rs/ui/chart";
 import {
   CartesianGrid,
   Line,
@@ -7,8 +9,6 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@planetiler-rs/ui/card";
-import { ChartTooltip, DataTable, LegendChips } from "@planetiler-rs/ui/chart";
 
 export interface SeriesSpec {
   key: string;
@@ -31,10 +31,7 @@ export interface BenchChartProps {
 
 /** One end-of-line direct label per series (relief for sub-3:1 hues). */
 function endLabel(data: BenchChartProps["data"], seriesKey: string, name: string) {
-  const last = data.reduce(
-    (found, row, i) => (row[seriesKey] != null ? i : found),
-    -1,
-  );
+  const last = data.reduce((found, row, i) => (row[seriesKey] != null ? i : found), -1);
   return (props: { x?: number | string; y?: number | string; index?: number }) => {
     if (props.index !== last || props.x == null || props.y == null) return <g />;
     return (

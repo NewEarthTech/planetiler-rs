@@ -18,7 +18,13 @@ export interface ButtonProps extends React.ComponentProps<"button"> {
   size?: keyof typeof SIZE_CLASSES;
 }
 
-export function Button({ variant = "outline", size = "sm", className, render, ...props }: ButtonProps) {
+export function Button({
+  variant = "outline",
+  size = "sm",
+  className,
+  render,
+  ...props
+}: ButtonProps) {
   return useRender({
     defaultTagName: "button",
     render,

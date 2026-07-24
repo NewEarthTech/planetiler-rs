@@ -1,17 +1,17 @@
-import { BenchChart } from "@/components/BenchChart";
-import { SERIES_COLOR } from "@planetiler-rs/ui/chart";
 import { Card, CardContent } from "@planetiler-rs/ui/card";
+import { SERIES_COLOR } from "@planetiler-rs/ui/chart";
 import { ThemeToggle } from "@planetiler-rs/ui/theme-toggle";
+import { fmtDuration, fmtMemory, fmtUsd } from "@planetiler-rs/ui/utils";
+import { BenchChart } from "@/components/BenchChart";
 import {
+  costUsd,
   EXTRACTS,
   LAST_UPDATED,
   MACHINE_LABEL,
   RUNS,
-  TRAJECTORY,
-  costUsd,
   type Run,
+  TRAJECTORY,
 } from "@/data/benchmarks";
-import { fmtDuration, fmtMemory, fmtUsd } from "@planetiler-rs/ui/utils";
 
 function findRun(extract: string, tool: Run["tool"], machine: Run["machine"]) {
   return RUNS.find(
@@ -24,8 +24,7 @@ function scaleRows(metric: (run: Run) => number | null) {
   return EXTRACTS.map((extract) => ({
     x: extract.label,
     rsLaptop: metric(findRun(extract.id, "planetiler-rs", "laptop-12c") ?? ({} as Run)) ?? null,
-    javaLaptop:
-      metric(findRun(extract.id, "planetiler-java", "laptop-12c") ?? ({} as Run)) ?? null,
+    javaLaptop: metric(findRun(extract.id, "planetiler-java", "laptop-12c") ?? ({} as Run)) ?? null,
     rsCloud: (() => {
       const run =
         findRun(extract.id, "planetiler-rs", "r7gd.4xlarge") ??
@@ -69,9 +68,7 @@ export default function App() {
   ).map((extract) => ({
     x: extract.label,
     rs: (() => {
-      const run = cloudRuns.find(
-        (r) => r.extract === extract.id && r.tool === "planetiler-rs",
-      );
+      const run = cloudRuns.find((r) => r.extract === extract.id && r.tool === "planetiler-rs");
       return run ? costUsd(run) : null;
     })(),
   }));
@@ -102,10 +99,9 @@ export default function App() {
             >
               Planetiler
             </a>
-            : same OSM extract in, matching tile output, measured on time,
-            memory, and what the build costs on a dedicated cloud box. We win at
-            city and state scale; Planetiler wins at country and continent. Both
-            are on the charts.
+            : same OSM extract in, matching tile output, measured on time, memory, and what the
+            build costs on a dedicated cloud box. We win at city and state scale; Planetiler wins at
+            country and continent. Both are on the charts.
           </p>
         </div>
         <ThemeToggle storageKey="tilebench-theme" />
@@ -125,7 +121,11 @@ export default function App() {
         <StatTile
           value={gbCloud ? fmtUsd(costUsd(gbCloud)!) : "—"}
           label="to build great-britain"
-          detail={gbCloud ? `${fmtDuration(gbCloud.wallS)} on ${MACHINE_LABEL[gbCloud.machine]}` : "cloud run pending"}
+          detail={
+            gbCloud
+              ? `${fmtDuration(gbCloud.wallS)} on ${MACHINE_LABEL[gbCloud.machine]}`
+              : "cloud run pending"
+          }
         />
       </section>
 
@@ -137,8 +137,17 @@ export default function App() {
           xKey="x"
           series={[
             { key: "rsLaptop", name: "planetiler-rs", color: SERIES_COLOR["planetiler-rs"] },
-            { key: "javaLaptop", name: "Planetiler (Java)", color: SERIES_COLOR["planetiler-java"] },
-            { key: "rsCloud", name: "planetiler-rs · EC2", color: SERIES_COLOR["planetiler-rs"], dashed: true },
+            {
+              key: "javaLaptop",
+              name: "Planetiler (Java)",
+              color: SERIES_COLOR["planetiler-java"],
+            },
+            {
+              key: "rsCloud",
+              name: "planetiler-rs · EC2",
+              color: SERIES_COLOR["planetiler-rs"],
+              dashed: true,
+            },
           ]}
           format={fmtDuration}
           yTicks={[0.5, 5, 60, 600, 3600]}
@@ -159,8 +168,17 @@ export default function App() {
           xKey="x"
           series={[
             { key: "rsLaptop", name: "planetiler-rs", color: SERIES_COLOR["planetiler-rs"] },
-            { key: "javaLaptop", name: "Planetiler (Java)", color: SERIES_COLOR["planetiler-java"] },
-            { key: "rsCloud", name: "planetiler-rs · EC2", color: SERIES_COLOR["planetiler-rs"], dashed: true },
+            {
+              key: "javaLaptop",
+              name: "Planetiler (Java)",
+              color: SERIES_COLOR["planetiler-java"],
+            },
+            {
+              key: "rsCloud",
+              name: "planetiler-rs · EC2",
+              color: SERIES_COLOR["planetiler-rs"],
+              dashed: true,
+            },
           ]}
           format={fmtMemory}
           yTicks={[100, 1024, 10240, 102400]}
@@ -199,9 +217,7 @@ export default function App() {
           description="On-demand EC2 rate × wall clock, dedicated benchmark boxes (us-east-1). planetiler-rs only so far: Planetiler has not been run on this hardware, so there is no cost comparison to draw yet."
           data={costData}
           xKey="x"
-          series={[
-            { key: "rs", name: "planetiler-rs", color: SERIES_COLOR["planetiler-rs"] },
-          ]}
+          series={[{ key: "rs", name: "planetiler-rs", color: SERIES_COLOR["planetiler-rs"] }]}
           format={fmtUsd}
           yScale="linear"
           table={{
@@ -216,21 +232,19 @@ export default function App() {
 
       <footer className="mt-10 border-t border-grid pt-5 text-xs leading-relaxed text-ink-muted">
         <p>
-          Method: identical task both sides, OSM extract to osm-qa-style MBTiles
-          (single layer), upstream Planetiler pinned at v0.10.2. Cloud numbers
-          are interleaved best-of-N rounds on dedicated instances launched per
-          run. Laptop numbers come from the recorded history in{" "}
+          Method: identical task both sides, OSM extract to osm-qa-style MBTiles (single layer),
+          upstream Planetiler pinned at v0.10.2. Cloud numbers are interleaved best-of-N rounds on
+          dedicated instances launched per run. Laptop numbers come from the recorded history in{" "}
           <a
             href="https://github.com/johncarmack1984/planetiler-rs/tree/main/bench/results"
             className="underline underline-offset-2"
           >
             bench/results
           </a>
-          , measured on a shared development machine where concurrent builds add
-          roughly ±5%. Our own output is verified byte-identical across every
-          optimization step. Against Planetiler the bar is semantic: tile counts
-          agree within 1% (monaco exact) and shared attributes are byte-identical,
-          while 51 of monaco&rsquo;s 102 tiles are semantically identical and the
+          , measured on a shared development machine where concurrent builds add roughly ±5%. Our
+          own output is verified byte-identical across every optimization step. Against Planetiler
+          the bar is semantic: tile counts agree within 1% (monaco exact) and shared attributes are
+          byte-identical, while 51 of monaco&rsquo;s 102 tiles are semantically identical and the
           rest differ by sub-pixel simplification. Updated {LAST_UPDATED}.
         </p>
       </footer>
