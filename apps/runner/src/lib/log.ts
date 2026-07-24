@@ -26,42 +26,53 @@ function parseTail(tail: string): { message: string; fields: Record<string, stri
 }
 
 /**
- * Parse a run's stderr into replayable lines. This is the same tracing
- * key=value grammar the live log drain will feed later; lines that don't
- * match (the final "Wrote …" summary has no timestamp) are kept verbatim
- * and inherit the previous line's offset.
+ * A stateful line parser for the tracing key=value grammar: offsets are
+ * measured from the first timestamped line it ever sees, so it can be fed
+ * incrementally (the live CloudWatch tail) or in one shot (the fixture).
+ * Lines that don't match (the final "Wrote …" summary has no timestamp) are
+ * kept verbatim and inherit the previous line's offset. Blank lines yield null.
  */
-export function parseLog(text: string): LogLine[] {
-  const lines: LogLine[] = [];
+export function createLogParser(): (raw: string) => LogLine | null {
   let startMs: number | null = null;
-  for (const raw of text.split("\n")) {
-    if (raw.trim() === "") continue;
+  let lastOffsetS = 0;
+  return (raw: string) => {
+    if (raw.trim() === "") return null;
     const match = raw.match(LINE_RE);
-    if (match) {
-      const [, ts, level, target, tail] = match;
-      const ms = Date.parse(ts);
-      if (startMs === null) startMs = ms;
-      const { message, fields } = parseTail(tail);
-      lines.push({
-        offsetS: (ms - startMs) / 1000,
-        time: ts.slice(11, 19),
-        level: level === "WARN" ? "WARN" : "INFO",
-        target: target.split("::").pop() ?? target,
-        tail,
-        message,
-        fields,
-      });
-    } else {
-      lines.push({
-        offsetS: lines.at(-1)?.offsetS ?? 0,
+    if (!match) {
+      return {
+        offsetS: lastOffsetS,
         time: "",
         level: "INFO",
         target: "",
         tail: raw,
         message: raw,
         fields: {},
-      });
+      };
     }
+    const [, ts, level, target, tail] = match;
+    const ms = Date.parse(ts);
+    if (startMs === null) startMs = ms;
+    lastOffsetS = (ms - startMs) / 1000;
+    const { message, fields } = parseTail(tail);
+    return {
+      offsetS: lastOffsetS,
+      time: ts.slice(11, 19),
+      level: level === "WARN" ? "WARN" : "INFO",
+      target: target.split("::").pop() ?? target,
+      tail,
+      message,
+      fields,
+    };
+  };
+}
+
+/** Parse a whole run log at once (the checked-in demo fixture). */
+export function parseLog(text: string): LogLine[] {
+  const parse = createLogParser();
+  const lines: LogLine[] = [];
+  for (const raw of text.split("\n")) {
+    const line = parse(raw);
+    if (line) lines.push(line);
   }
   return lines;
 }

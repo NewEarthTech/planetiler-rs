@@ -1,30 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import fixtureRaw from "@/fixtures/planet-run-20260722.log?raw";
+import { EMPTY_FEED, type Feed, nextFeed, type RunState } from "@/lib/feed";
 import { type LogLine, parseLog } from "@/lib/log";
-import { PHASES } from "@/lib/phases";
 
 const DEMO_LINES = parseLog(fixtureRaw);
 /** Real 10 526 s replayed in ~88 s. */
 const SPEED = 120;
 const TICK_MS = 100;
 const PROVISION_MS = 2500;
-const MAX_LINES = 500;
-
-export type RunState = "idle" | "provisioning" | "ready" | "running" | "done" | "cancelled";
-
-export interface Counters {
-  pieces: number | null;
-  entries: number | null;
-  tiles: number | null;
-}
-
-interface Feed {
-  lines: LogLine[];
-  simElapsedS: number;
-  /** Real per-phase elapsed_s, recorded when the phase's marker line is emitted. */
-  phaseDone: Record<string, number>;
-  counters: Counters;
-}
 
 export interface DemoRun extends Feed {
   state: RunState;
@@ -34,41 +17,10 @@ export interface DemoRun extends Feed {
   destroy: () => void;
 }
 
-const EMPTY_FEED: Feed = {
-  lines: [],
-  simElapsedS: 0,
-  phaseDone: {},
-  counters: { pieces: null, entries: null, tiles: null },
-};
-
-function nextFeed(prev: Feed, appended: LogLine[], simElapsedS: number): Feed {
-  const lines = appended.length ? [...prev.lines, ...appended].slice(-MAX_LINES) : prev.lines;
-  let phaseDone = prev.phaseDone;
-  let counters = prev.counters;
-  for (const line of appended) {
-    for (const phase of PHASES) {
-      if (phase.donePattern.test(line.message)) {
-        phaseDone = { ...phaseDone, [phase.id]: Number(line.fields.elapsed_s) };
-      }
-    }
-    const pieces = line.fields.total_pieces;
-    const entries = line.fields.entries_consumed;
-    const tiles = line.fields.tiles_completed ?? line.fields.tiles;
-    if (pieces || entries || tiles) {
-      counters = {
-        pieces: pieces ? Number(pieces) : counters.pieces,
-        entries: entries ? Number(entries) : counters.entries,
-        tiles: tiles ? Number(tiles) : counters.tiles,
-      };
-    }
-  }
-  return { lines, simElapsedS, phaseDone, counters };
-}
-
 /**
  * The demo replay: a client-only state machine that streams the checked-in
- * planet-run fixture through the same shapes a live run will use. No
- * backend, no network — Dispatch replays, Cancel freezes, Destroy resets.
+ * planet-run fixture through the same shapes a live run uses. No backend,
+ * no network — Dispatch replays, Cancel freezes, Destroy resets.
  */
 export function useDemoRun(): DemoRun {
   const [state, setState] = useState<RunState>("idle");

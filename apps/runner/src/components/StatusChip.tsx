@@ -1,6 +1,6 @@
 import { Badge, type BadgeProps } from "@planetiler-rs/ui/badge";
 import { cn } from "@planetiler-rs/ui/utils";
-import type { RunState } from "@/hooks/useDemoRun";
+import type { RunState } from "@/lib/feed";
 
 const STATE_CHIP: Record<
   RunState,

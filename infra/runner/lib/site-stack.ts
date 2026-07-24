@@ -4,11 +4,25 @@ import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as cognito from "aws-cdk-lib/aws-cognito";
+import {
+  IdentityPool,
+  UserPoolAuthenticationProvider,
+} from "aws-cdk-lib/aws-cognito-identitypool";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as logs from "aws-cdk-lib/aws-logs";
 import * as route53 from "aws-cdk-lib/aws-route53";
 import * as targets from "aws-cdk-lib/aws-route53-targets";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import { Construct } from "constructs";
+
+/**
+ * Fixed physical names, because `services/cloud-runner/run.sh` and `drain.sh`
+ * reference them from bash without CloudFormation lookups. The bench boxes
+ * write here from any region (the group lives with this stack in us-east-1).
+ */
+export const RUN_LOG_GROUP = "/planetiler-rs/runs";
+export const BENCH_BOX_PROFILE = "planetiler-rs-bench-box";
 
 export interface RunnerConsoleStackProps extends cdk.StackProps {
   /** Fully-qualified domain the console is served from. */
@@ -148,6 +162,53 @@ export class RunnerConsoleStack extends cdk.Stack {
       });
     }
 
+    // -----------------------------------------------------------------
+    // Live run logs: bench boxes drain job/stderr/mem files into one log
+    // group (write-only, via an instance profile — no shipped
+    // credentials), and the signed-in console reads them directly from
+    // the browser with identity-pool credentials scoped to that group.
+    // No server in between: the SPA polls GetLogEvents.
+    // -----------------------------------------------------------------
+    const runLogs = new logs.LogGroup(this, "RunLogs", {
+      logGroupName: RUN_LOG_GROUP,
+      retention: logs.RetentionDays.THREE_MONTHS,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    // Both ARN forms: the bare group ARN (group-level actions) and the
+    // `:*` form (stream-level actions). logGroupArn already ends in `:*`.
+    const groupArns = [
+      `arn:${this.partition}:logs:${this.region}:${this.account}:log-group:${RUN_LOG_GROUP}`,
+      runLogs.logGroupArn,
+    ];
+
+    const boxRole = new iam.Role(this, "BenchBoxRole", {
+      assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
+      description: "planetiler-rs bench box: write run logs to the run log group",
+    });
+    boxRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        resources: groupArns,
+      }),
+    );
+    new iam.InstanceProfile(this, "BenchBoxProfile", {
+      instanceProfileName: BENCH_BOX_PROFILE,
+      role: boxRole,
+    });
+
+    const identityPool = new IdentityPool(this, "Identity", {
+      allowUnauthenticatedIdentities: false,
+      authenticationProviders: {
+        userPools: [new UserPoolAuthenticationProvider({ userPool: pool, userPoolClient: client })],
+      },
+    });
+    identityPool.authenticatedRole.addToPrincipalPolicy(
+      new iam.PolicyStatement({
+        actions: ["logs:DescribeLogStreams", "logs:GetLogEvents", "logs:FilterLogEvents"],
+        resources: groupArns,
+      }),
+    );
+
     const target = route53.RecordTarget.fromAlias(
       new targets.CloudFrontTarget(distribution),
     );
@@ -176,6 +237,11 @@ export class RunnerConsoleStack extends cdk.Stack {
             region: this.region,
             identityProvider: samlIdp ? SAML_PROVIDER : "",
           },
+          runs: {
+            region: this.region,
+            logGroup: RUN_LOG_GROUP,
+            identityPoolId: identityPool.identityPoolId,
+          },
         }),
       ],
       destinationBucket: bucket,
@@ -188,6 +254,9 @@ export class RunnerConsoleStack extends cdk.Stack {
     new cdk.CfnOutput(this, "BucketName", { value: bucket.bucketName });
     new cdk.CfnOutput(this, "UserPoolId", { value: pool.userPoolId });
     new cdk.CfnOutput(this, "ClientId", { value: client.userPoolClientId });
+    new cdk.CfnOutput(this, "RunLogGroup", { value: runLogs.logGroupName });
+    new cdk.CfnOutput(this, "BenchBoxProfileName", { value: BENCH_BOX_PROFILE });
+    new cdk.CfnOutput(this, "IdentityPoolId", { value: identityPool.identityPoolId });
     // For configuring the Identity Center SAML app (README → Auth).
     new cdk.CfnOutput(this, "SamlAcsUrl", {
       description: "Identity Center SAML app: Application ACS URL",

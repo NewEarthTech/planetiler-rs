@@ -1,6 +1,6 @@
 import { Button } from "@planetiler-rs/ui/button";
 import { StatusChip } from "@/components/StatusChip";
-import type { RunState } from "@/hooks/useDemoRun";
+import type { RunState } from "@/lib/feed";
 
 interface ActionBarProps {
   state: RunState;
