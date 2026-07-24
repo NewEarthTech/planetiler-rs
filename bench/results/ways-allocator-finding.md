@@ -4,7 +4,7 @@ The probe (`ways-parallelism-probe.md`, #38) localized the pass-2 governor to th
 
 ## Increment 1 — parallelize `process_feature`: FALSIFIED
 
-Branch `engine/ways-parallel-process` (parked, not merged). It buffers source features into a chunk and runs `process_feature` across the rayon pool (`par_iter().map().collect()`, order preserved) instead of one feature at a time.
+Branch `engine/ways-parallel-process-PARKED-FALSIFIED` (parked, not merged). It buffers source features into a chunk and runs `process_feature` across the rayon pool (`par_iter().map().collect()`, order preserved) instead of one feature at a time.
 
 **Byte-identical — the full ladder is green** (branch vs `main`, tiles content hash + metadata hash + `tiles_shallow`/`tiles_data` row counts all match):
 
@@ -69,4 +69,4 @@ Every phase improves — the signature of an allocator-bound pipeline lifting at
 ## Status
 
 - **mimalloc: shipped to `main`.** Byte-identical on the full ladder, faster + lower RSS on every local scale — it passes the requirements it can be held to locally. The one open validation is planet-scale RSS (next planet run).
-- `engine/ways-parallel-process` — parked receipt of the falsified increment (byte-identical, perf-negative). Not merged; kept as the record of why the campaign turned to the allocator, not more parallelism.
+- `engine/ways-parallel-process-PARKED-FALSIFIED` — parked receipt of the falsified increment (byte-identical, perf-negative). Not merged; kept as the record of why the campaign turned to the allocator, not more parallelism.

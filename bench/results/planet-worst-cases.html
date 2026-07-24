@@ -296,7 +296,7 @@
 
   <div class="cards">
     <div class="card no">
-      <h3>engine/ways-parallel-process</h3>
+      <h3>engine/ways-parallel-process-PARKED-FALSIFIED</h3>
       <p>Buffers 4,096 source features, then runs <code>process_feature</code> across the rayon pool with an order-preserving <code>par_iter().collect()</code>.</p>
       <p><b>Why it lost:</b> with <code>--layer osm</code> the profile is <code>PassthroughProfile</code>, whose <code>process_feature</code> is a geometry clone plus a tag-map clone. That is <em>pure allocation, not compute.</em> Spreading it across the pool made threads fight the global allocator, and the parallel collect held every inner <code>Vec</code> live at once instead of one at a time.</p>
 <pre class="code no"><span class="c">// parked: spread the per-feature profile step across the pool</span>
@@ -557,7 +557,7 @@ static GLOBAL: <span class="t">mimalloc::MiMalloc</span> = <span class="t">mimal
     <thead><tr><th>Experiment</th><th>Approach</th><th>Target</th><th>Result</th><th>Where it lives</th></tr></thead>
     <tbody>
       <tr><td>partitioned k-way merge</td><td>add parallelism</td><td>worst case ②</td><td><span class="pill no">+3.5% wall</span></td><td class="mut"><code>perf/parallel-merge</code></td></tr>
-      <tr><td>parallel <code>process_feature</code></td><td>add parallelism</td><td>worst case ①</td><td><span class="pill no">+7.5% profile</span></td><td class="mut"><code>engine/ways-parallel-process</code></td></tr>
+      <tr><td>parallel <code>process_feature</code></td><td>add parallelism</td><td>worst case ①</td><td><span class="pill no">+7.5% profile</span></td><td class="mut"><code>engine/ways-parallel-process-PARKED-FALSIFIED</code></td></tr>
       <tr><td>overlap decode with consume</td><td>add concurrency</td><td>worst case ①</td><td><span class="pill no">−0.2%, neutral</span></td><td class="mut"><code>perf/overlap-decode-consume</code></td></tr>
       <tr><td>mimalloc global allocator</td><td>cheaper allocation</td><td>worst case ①</td><td><span class="pill ok">−12% wall, −17% RSS</span></td><td class="mut">merged · #40</td></tr>
       <tr><td>borrow, don't clone</td><td>fewer allocations</td><td>worst case ①</td><td><span class="pill ok">−7% consume</span></td><td class="mut">merged · #41</td></tr>

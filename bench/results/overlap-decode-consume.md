@@ -47,5 +47,17 @@ One real property did show up: the branch is markedly **more stable**. Stream sp
 
 ## Status
 
-- **NOT merged.** Branch `perf/overlap-decode-consume` is parked as the receipt, alongside `perf/parallel-merge` and `engine/ways-parallel-process`. Byte-identical and correct; it simply does not buy anything here.
+- **NOT merged.** Branch `perf/overlap-decode-consume` is parked as the receipt. Byte-identical and correct; it simply does not buy anything here.
+
+### The parked receipts, in one place
+
+Three branches carry falsified experiments. All are byte-identical to their baseline, all are pushed to `origin`, and **none of them should ever be merged or deleted** — each is a reproducible negative result, so a future measurement that changes the premise can rebase and re-measure instead of rebuilding from prose.
+
+| branch | experiment | verdict |
+|---|---|---|
+| `perf/parallel-merge` | partitioned k-way merge | +3.5% wall (great-britain), +0.4% (europe) |
+| `engine/ways-parallel-process-PARKED-FALSIFIED` | parallel `process_feature` | +7.5% `profile_s` |
+| `perf/overlap-decode-consume` | overlap decode with consume | −0.2%, inside the noise |
+
+The verbose suffix on the middle one is deliberate: it was the only receipt that had never been pushed, so it got the loud name when it was backed up. "Falsified" rather than "failed" — the code works, the hypothesis did not.
 - Remaining named lever in the consume: the serial `sort.add` feed inside `render_s`. Given this result, it deserves a split measurement (render-collect vs `sort.add`) proving the feed is actually the floor **before** any code is written — the probe-first rule, which this increment honoured on #38's evidence and still landed on a stale premise. Evidence has a shelf life; re-probe after the pipeline changes underneath it.
