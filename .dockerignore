@@ -1,0 +1,28 @@
+# The runner image (services/cloud-runner/Dockerfile) needs only the cargo
+# workspace and the vendored proto. Everything else just bloats the build
+# context and busts the cache — keep it out.
+.git
+.github
+
+# Build/output artifacts
+**/target
+parity/data
+parity/upstream
+services/cloud-runner/results
+bench/results
+*.mbtiles
+*.pmtiles
+
+# The JS estate (console, docs, shared UI, CDK) is unrelated to the CLI build
+apps
+packages
+infra
+**/node_modules
+**/dist
+**/cdk.out
+
+# Docs and local Claude context
+docs
+*.md
+.claude
+CLAUDE.md

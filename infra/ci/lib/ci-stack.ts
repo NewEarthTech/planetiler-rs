@@ -48,6 +48,37 @@ export class PlanetilerRsCiStack extends cdk.Stack {
       }),
     );
 
+    // Push the runner image to ECR (.github/workflows/image.yml). Unlike a
+    // `cdk deploy`, `docker push` isn't brokered by the bootstrap roles, so the
+    // deploy role needs ECR access directly. The repository is created in
+    // RunnerConsoleStack (infra/runner) with the fixed name below and lives in
+    // us-east-1 with the rest of the runner infra; referencing it by ARN string
+    // (not a cross-stack import) keeps the two islands independently deployable.
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "EcrLogin",
+        // Account-level action — cannot be scoped to a single repository.
+        actions: ["ecr:GetAuthorizationToken"],
+        resources: ["*"],
+      }),
+    );
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: "PushRunnerImage",
+        actions: [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:InitiateLayerUpload",
+          "ecr:UploadLayerPart",
+          "ecr:CompleteLayerUpload",
+          "ecr:PutImage",
+          // Read existing layers/tags so buildx cache-from and re-tagging work.
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+        ],
+        resources: [`arn:${this.partition}:ecr:us-east-1:${this.account}:repository/planetiler-rs-bench`],
+      }),
+    );
+
     new cdk.CfnOutput(this, "CiDeployRoleArn", {
       value: role.roleArn,
       description: "Set this as the repo variable AWS_DEPLOY_ROLE_ARN",

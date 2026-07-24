@@ -8,6 +8,7 @@ import {
   IdentityPool,
   UserPoolAuthenticationProvider,
 } from "aws-cdk-lib/aws-cognito-identitypool";
+import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as route53 from "aws-cdk-lib/aws-route53";
@@ -23,6 +24,13 @@ import { Construct } from "constructs";
  */
 export const RUN_LOG_GROUP = "/planetiler-rs/runs";
 export const BENCH_BOX_PROFILE = "planetiler-rs-bench-box";
+/**
+ * ECR repo the CLI runner image is pushed to (`.github/workflows/image.yml`)
+ * and a dispatched bench box pulls from. Fixed name for the same reason as the
+ * log group and instance profile: infra/ci grants the deploy role push access
+ * by this exact ARN without a cross-stack import.
+ */
+export const BENCH_IMAGE_REPO = "planetiler-rs-bench";
 
 export interface RunnerConsoleStackProps extends cdk.StackProps {
   /** Fully-qualified domain the console is served from. */
@@ -196,6 +204,31 @@ export class RunnerConsoleStack extends cdk.Stack {
       role: boxRole,
     });
 
+    // -----------------------------------------------------------------
+    // Runner image registry: CI (image.yml) builds the release CLI and
+    // pushes it here on merges to main; a console-dispatched bench box
+    // pulls it instead of compiling from source. Push access lives on
+    // the infra/ci deploy role (scoped to this repo's ARN by name); the
+    // box's own pull access is granted here, next to its role.
+    // -----------------------------------------------------------------
+    const imageRepo = new ecr.Repository(this, "BenchImage", {
+      repositoryName: BENCH_IMAGE_REPO,
+      imageScanOnPush: true,
+      // Images are rebuildable from CI, so the registry is disposable with
+      // the stack. Keep only the recent tags; drop untagged layers quickly.
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      emptyOnDelete: true,
+      lifecycleRules: [
+        {
+          description: "expire untagged layers",
+          tagStatus: ecr.TagStatus.UNTAGGED,
+          maxImageAge: cdk.Duration.days(7),
+        },
+        { description: "keep the last 20 images", maxImageCount: 20 },
+      ],
+    });
+    imageRepo.grantPull(boxRole);
+
     const identityPool = new IdentityPool(this, "Identity", {
       allowUnauthenticatedIdentities: false,
       authenticationProviders: {
@@ -256,6 +289,10 @@ export class RunnerConsoleStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ClientId", { value: client.userPoolClientId });
     new cdk.CfnOutput(this, "RunLogGroup", { value: runLogs.logGroupName });
     new cdk.CfnOutput(this, "BenchBoxProfileName", { value: BENCH_BOX_PROFILE });
+    new cdk.CfnOutput(this, "BenchImageRepo", {
+      description: "docker pull <this>:<sha> on a dispatched bench box",
+      value: imageRepo.repositoryUri,
+    });
     new cdk.CfnOutput(this, "IdentityPoolId", { value: identityPool.identityPoolId });
     // For configuring the Identity Center SAML app (README → Auth).
     new cdk.CfnOutput(this, "SamlAcsUrl", {

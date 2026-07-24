@@ -36,6 +36,11 @@ Live at <https://runner.johncarmack.com>. CI deploys on every push to `main` tha
 1. ~~UI shell with demo replay~~ (#48)
 2. ~~Static deploy (CDK, like tilebench)~~ (#49, CI-deployed since #50)
 3. ~~Auth (AWS SSO)~~ (#55)
-4. ~~Live log drain into this UI~~ (this — CloudWatch Logs + identity-pool polling, not a websocket)
-5. Runner image build/push to ECR in CI (toward console-side dispatch)
-6. Tighten and harden
+4. ~~Live log drain into this UI~~ (#56 — CloudWatch Logs + identity-pool polling, not a websocket)
+5. ~~Runner image build/push to ECR in CI~~ (this — see Runner image below)
+6. Console-side dispatch: launch a box from the console (run API + wiring the ActionBar to it)
+7. Tighten and harden
+
+## Runner image
+
+`.github/workflows/image.yml` builds the release CLI (`services/cloud-runner/Dockerfile`, a minimal glibc image with `planetiler-rs` as the entrypoint) natively on arm64 and, on merges to main, pushes `planetiler-rs-bench:<sha>` and `:main` to ECR. The repository is created by `RunnerConsoleStack` next to the bench-box instance profile, which can already pull it; push access lives on the infra/ci deploy role (no AWS keys — OIDC). A console-dispatched box will `docker pull` this instead of compiling from source the way `services/cloud-runner/remote*.sh` do today — that dispatch path is the next phase, not this one.
