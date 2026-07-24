@@ -1,5 +1,5 @@
 {
-  "name": "tilebench-infra",
+  "name": "@planetiler-rs/docs-infra",
   "private": true,
   "version": "0.1.0",
   "scripts": {
