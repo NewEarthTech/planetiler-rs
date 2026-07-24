@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import "source-map-support/register";
+import * as fs from "fs";
 import * as path from "path";
 import * as dotenv from "dotenv";
 import * as cdk from "aws-cdk-lib";
+import { RunnerBackendStack } from "../lib/backend-stack";
 import { RunnerConsoleStack } from "../lib/site-stack";
 
 // Load infra/runner/.env (gitignored) before reading config, regardless of cwd.
@@ -30,6 +32,26 @@ new RunnerConsoleStack(app, "RunnerConsoleStack", {
   // Only used before SAML is wired; defaults to the repo's commit author.
   ownerEmail: process.env.RUNNER_OWNER_EMAIL ?? "johncarmack@me.com",
 });
+
+// The SSE backend (#59). Only instantiated when the cross-built binary is
+// present, so console-only deploys never require a Rust build — the binary
+// comes from `just runner::build-backend` locally or the backend workflow.
+const backendBinary = path.join(__dirname, "..", "dist-backend", "runner-live");
+if (fs.existsSync(backendBinary)) {
+  new RunnerBackendStack(app, "RunnerBackendStack", {
+    env: { account, region: "us-east-1" },
+    domainName: process.env.RUNNER_LIVE_DOMAIN ?? "live.runner.johncarmack.com",
+    zoneName: process.env.RUNNER_ZONE_NAME ?? "johncarmack.com",
+    zoneId: requireEnv("RUNNER_ZONE_ID"),
+    binaryPath: backendBinary,
+    consoleConfigUrl: `https://${process.env.RUNNER_DOMAIN ?? "runner.johncarmack.com"}/config.json`,
+    acmeEmail: process.env.RUNNER_OWNER_EMAIL ?? "johncarmack@me.com",
+  });
+} else {
+  console.warn(
+    `skipping RunnerBackendStack: ${backendBinary} not found (just runner::build-backend)`,
+  );
+}
 
 function requireEnv(name: string): string {
   const value = process.env[name];

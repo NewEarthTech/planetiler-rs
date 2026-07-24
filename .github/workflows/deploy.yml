@@ -59,4 +59,4 @@ jobs:
           # Unset until the one-time Identity Center app wiring is done
           # (apps/runner/README.md → Auth); blank means Cognito-local sign-in.
           RUNNER_SAML_METADATA_URL: ${{ vars.RUNNER_SAML_METADATA_URL }}
-        run: pnpm exec cdk deploy --require-approval never
+        run: pnpm exec cdk deploy RunnerConsoleStack --require-approval never
