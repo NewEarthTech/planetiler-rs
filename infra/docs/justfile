@@ -7,8 +7,8 @@ build:
 
 # Build + publish: the CDK BucketDeployment ships apps/docs/dist and
 # invalidates CloudFront as part of the deploy. Requires default AWS creds and
-# ./.env (see .env.example). ⚠️ The live stack is still GeobenchStack at
-# geobench.johncarmack.com — deploying creates TilebenchStack as a second site.
+# ./.env (see .env.example). (GeobenchStack/geobench.johncarmack.com is a
+# different project — johncarmack1984/geo-desktop-bench — not this site.)
 deploy: build
     pnpm exec cdk deploy --require-approval never
 
