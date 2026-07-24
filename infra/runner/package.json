@@ -3,7 +3,8 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "aws-cdk-lib": "^2.220.0",

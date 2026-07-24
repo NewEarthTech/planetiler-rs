@@ -1,5 +1,5 @@
 {
-  "app": "npx ts-node --prefer-ts-exts bin/runner.ts",
+  "app": "pnpm exec ts-node --prefer-ts-exts bin/runner.ts",
   "watch": {
     "include": ["**"],
     "exclude": ["node_modules", "cdk.out"]

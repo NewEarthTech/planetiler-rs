@@ -1,0 +1,12 @@
+set shell := ["bash", "-cu"]
+
+# One-time (and on trust/permission changes): create or update the CI deploy
+# role. Run with admin creds; see README.md for the repo-variable wiring.
+deploy:
+    pnpm install
+    pnpm exec cdk deploy --require-approval never
+
+# Show what a deploy would change without applying it.
+diff:
+    pnpm install
+    pnpm exec cdk diff
