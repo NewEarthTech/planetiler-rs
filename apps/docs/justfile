@@ -2,8 +2,8 @@ set shell := ["bash", "-cu"]
 
 # Build the production site into dist/.
 build:
-    bun install
-    bun run build
+    pnpm install
+    pnpm run build
 
 # Build + publish: the CDK BucketDeployment ships dist/ and invalidates
 # CloudFront as part of the deploy. Requires default AWS creds and

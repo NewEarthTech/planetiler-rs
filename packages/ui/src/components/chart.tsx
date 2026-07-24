@@ -1,5 +1,5 @@
 import { Collapsible } from "@base-ui-components/react/collapsible";
-import { cn } from "@/lib/utils";
+import { cn } from "@planetiler-rs/ui/utils";
 
 /** Fixed categorical assignment — color follows the entity, everywhere. */
 export const SERIES_COLOR = {
@@ -19,7 +19,7 @@ export function LegendChips({
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
       {items.map((item) => (
         <span key={item.label} className="flex items-center gap-1.5 text-xs text-ink-secondary">
-          <svg width="16" height="8" aria-hidden>
+          <svg width="16" height="8" aria-hidden="true">
             <line
               x1="0"
               y1="4"
@@ -97,7 +97,7 @@ export function DataTable({
           className="size-3 transition-transform group-data-[panel-open]:rotate-90"
           viewBox="0 0 12 12"
           fill="none"
-          aria-hidden
+          aria-hidden="true"
         >
           <path d="M4.5 2.5 8 6l-3.5 3.5" stroke="currentColor" strokeWidth="1.5" />
         </svg>

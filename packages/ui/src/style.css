@@ -1,0 +1,65 @@
+@import "tailwindcss" source("../src");
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Validated reference palette (dataviz method): categorical slots + chrome.
+   Light and dark are separately selected steps, both validator-passing. */
+:root {
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-secondary: #52514e;
+  --ink-muted: #898781;
+  --grid: #e1e0d9;
+  --baseline: #c3c2b7;
+  --ring: rgba(11, 11, 11, 0.1);
+  --chart-1: #2a78d6; /* planetiler-rs */
+  --chart-2: #1baf7a; /* Planetiler (Java) */
+  --chart-3: #eda100; /* in-flight branch / third series */
+  --good: #006300;
+  --danger: #b3261e; /* destructive actions; always paired with a text label */
+}
+
+.dark {
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #ffffff;
+  --ink-secondary: #c3c2b7;
+  --ink-muted: #898781;
+  --grid: #2c2c2a;
+  --baseline: #383835;
+  --ring: rgba(255, 255, 255, 0.1);
+  --chart-1: #3987e5;
+  --chart-2: #199e70;
+  --chart-3: #c98500;
+  --good: #0ca30c;
+  --danger: #f2555a;
+}
+
+@theme inline {
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-secondary: var(--ink-secondary);
+  --color-ink-muted: var(--ink-muted);
+  --color-grid: var(--grid);
+  --color-baseline: var(--baseline);
+  --color-ring-hairline: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-good: var(--good);
+  --color-danger: var(--danger);
+}
+
+html {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+body {
+  @apply bg-page text-ink antialiased;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}

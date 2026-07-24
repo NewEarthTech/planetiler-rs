@@ -57,20 +57,89 @@ export interface Run {
 /** Best recorded head-to-head runs per (extract, tool, machine). */
 export const RUNS: Run[] = [
   // — laptop history (bench/results/osm-qa-headtohead.md) —
-  { extract: "monaco", tool: "planetiler-rs", machine: "laptop-12c", wallS: 0.41, peakRssMB: 84, date: "2026-07-01" },
-  { extract: "monaco", tool: "planetiler-java", machine: "laptop-12c", wallS: 2.2, peakRssMB: 1068, date: "2026-07-01" },
-  { extract: "rhode-island", tool: "planetiler-rs", machine: "laptop-12c", wallS: 4.0, peakRssMB: 1088, date: "2026-07-01", note: "sparse node store" },
-  { extract: "rhode-island", tool: "planetiler-java", machine: "laptop-12c", wallS: 8.94, peakRssMB: 7814, date: "2026-07-01" },
-  { extract: "great-britain", tool: "planetiler-rs", machine: "laptop-12c", wallS: 153, peakRssMB: 5939, date: "2026-07-01", note: "sparse, z12" },
-  { extract: "great-britain", tool: "planetiler-java", machine: "laptop-12c", wallS: 81, peakRssMB: 29798, date: "2026-07-01", note: "z12" },
-  { extract: "europe", tool: "planetiler-rs", machine: "laptop-12c", wallS: 2496, peakRssMB: 54579, date: "2026-07-02", note: "round 2: parallel write + relation capture off heap" },
-  { extract: "europe", tool: "planetiler-java", machine: "laptop-12c", wallS: 1062, peakRssMB: 76698, date: "2026-07-01", note: "stock defaults" },
+  {
+    extract: "monaco",
+    tool: "planetiler-rs",
+    machine: "laptop-12c",
+    wallS: 0.41,
+    peakRssMB: 84,
+    date: "2026-07-01",
+  },
+  {
+    extract: "monaco",
+    tool: "planetiler-java",
+    machine: "laptop-12c",
+    wallS: 2.2,
+    peakRssMB: 1068,
+    date: "2026-07-01",
+  },
+  {
+    extract: "rhode-island",
+    tool: "planetiler-rs",
+    machine: "laptop-12c",
+    wallS: 4.0,
+    peakRssMB: 1088,
+    date: "2026-07-01",
+    note: "sparse node store",
+  },
+  {
+    extract: "rhode-island",
+    tool: "planetiler-java",
+    machine: "laptop-12c",
+    wallS: 8.94,
+    peakRssMB: 7814,
+    date: "2026-07-01",
+  },
+  {
+    extract: "great-britain",
+    tool: "planetiler-rs",
+    machine: "laptop-12c",
+    wallS: 153,
+    peakRssMB: 5939,
+    date: "2026-07-01",
+    note: "sparse, z12",
+  },
+  {
+    extract: "great-britain",
+    tool: "planetiler-java",
+    machine: "laptop-12c",
+    wallS: 81,
+    peakRssMB: 29798,
+    date: "2026-07-01",
+    note: "z12",
+  },
+  {
+    extract: "europe",
+    tool: "planetiler-rs",
+    machine: "laptop-12c",
+    wallS: 2496,
+    peakRssMB: 54579,
+    date: "2026-07-02",
+    note: "round 2: parallel write + relation capture off heap",
+  },
+  {
+    extract: "europe",
+    tool: "planetiler-java",
+    machine: "laptop-12c",
+    wallS: 1062,
+    peakRssMB: 76698,
+    date: "2026-07-01",
+    note: "stock defaults",
+  },
 
   // — dedicated EC2 runs (services/cloud-runner/results/) —
   // Geofabrik re-fetched on the run date, so this is a later extract vintage
   // than the laptop row above (21324 tiles vs 21472) as well as different
   // hardware. Same flags, but not a like-for-like pair with the laptop number.
-  { extract: "great-britain", tool: "planetiler-rs", machine: "r7gd.4xlarge", wallS: 245.0, peakRssMB: 4194, date: "2026-07-03", note: "best of 3 interleaved rounds, geofabrik-latest input" },
+  {
+    extract: "great-britain",
+    tool: "planetiler-rs",
+    machine: "r7gd.4xlarge",
+    wallS: 245.0,
+    peakRssMB: 4194,
+    date: "2026-07-03",
+    note: "best of 3 interleaved rounds, geofabrik-latest input",
+  },
 ];
 
 export interface TrajectoryPoint {
@@ -94,7 +163,13 @@ export const TRAJECTORY: TrajectoryPoint[] = [
   // the -1% the round-3 comparison suggests. Machine noise, not a plateau.
   { extract: "great-britain", round: 4, label: "parallel write", wallS: 150.9, date: "2026-07-02" },
   { extract: "europe", round: 1, label: "first run", wallS: 3198, date: "2026-07-01" },
-  { extract: "europe", round: 2, label: "parallel write + relation memory", wallS: 2496, date: "2026-07-02" },
+  {
+    extract: "europe",
+    round: 2,
+    label: "parallel write + relation memory",
+    wallS: 2496,
+    date: "2026-07-02",
+  },
 ];
 
 export function costUsd(run: Run): number | null {

@@ -10,12 +10,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@base-ui-components/react": "1.0.0-rc.0",
-    "clsx": "^2.1.1",
+    "@planetiler-rs/ui": "workspace:*",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
-    "recharts": "^3.6.0",
-    "tailwind-merge": "^3.6.0"
+    "recharts": "^3.6.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.1",
