@@ -1,5 +1,5 @@
 {
-  "name": "planetiler-rs-web",
+  "name": "@planetiler-rs/web",
   "private": true,
   "packageManager": "pnpm@11.17.0",
   "scripts": {
@@ -7,8 +7,8 @@
     "typecheck": "pnpm -r typecheck",
     "check": "biome check .",
     "format": "biome format --write .",
-    "dev:docs": "pnpm --filter tilebench dev",
-    "dev:runner": "pnpm --filter runner dev"
+    "dev:docs": "pnpm --filter @planetiler-rs/docs dev",
+    "dev:runner": "pnpm --filter @planetiler-rs/runner dev"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5"

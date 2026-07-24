@@ -9,10 +9,14 @@ This is the UI shell — no backend is wired yet. Dispatch replays the first ful
 - `pnpm install && pnpm dev` here, or `pnpm dev:runner` from the workspace root
 - `pnpm build` / `pnpm typecheck`; lint and format come from the workspace root (`pnpm check`)
 
+## Deploy
+
+Live at <https://runner.johncarmack.com>. `just deploy` here builds `dist/` and runs the CDK deploy in `../../infra/runner` (stack `RunnerConsoleStack`, mirrors the tilebench stack in `infra/docs`); `just diff` previews. Needs default AWS creds and `infra/runner/.env` (see `.env.example` there).
+
 ## Roadmap
 
-1. UI shell with demo replay (this)
-2. Static deploy (CDK, like tilebench)
+1. ~~UI shell with demo replay~~ (#48)
+2. ~~Static deploy (CDK, like tilebench)~~ (this)
 3. Auth (AWS SSO)
 4. Batch image build/push to ECR in CI; live log drain → websocket into this UI
 5. Tighten and harden
