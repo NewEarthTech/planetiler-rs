@@ -9,8 +9,31 @@ build:
 # invalidates CloudFront as part of the deploy. Local fallback — CI deploys on
 # merge to main. Requires default AWS creds and ./.env (see .env.example).
 deploy: build
-    pnpm exec cdk deploy --require-approval never
+    pnpm exec cdk deploy RunnerConsoleStack --require-approval never
 
 # Show what a deploy would change without applying it.
 diff: build
-    pnpm exec cdk diff
+    pnpm exec cdk diff RunnerConsoleStack
+
+# Cross-build the runner-live release binary for the backend box
+# (aarch64-linux, glibc-matched to Ubuntu 24.04) into ./dist-backend.
+# Named volumes keep the container's target/registry caches off the host
+# target dir, so macOS and Linux artifacts never mix.
+build-backend:
+    docker run --rm --platform linux/arm64 \
+      -v "$(git rev-parse --show-toplevel)":/src -w /src \
+      -v planetiler-backend-target:/target -e CARGO_TARGET_DIR=/target \
+      -v planetiler-backend-registry:/usr/local/cargo/registry \
+      rust:1-bookworm \
+      bash -c "cargo build -p runner-live --release --locked && cp /target/release/runner-live /src/infra/runner/dist-backend-out"
+    mkdir -p dist-backend && mv dist-backend-out dist-backend/runner-live
+
+# Deploy the SSE backend (#59): t4g.nano + Caddy at live.runner.johncarmack.com.
+# A changed binary replaces the instance (its asset hash rides in user-data).
+deploy-backend: build-backend
+    pnpm install
+    pnpm exec cdk deploy RunnerBackendStack --require-approval never
+
+diff-backend: build-backend
+    pnpm install
+    pnpm exec cdk diff RunnerBackendStack

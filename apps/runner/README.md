@@ -10,6 +10,16 @@ The drain is deliberately serverless on both ends. Write side: `run.sh` attaches
 
 Everything is additive: a box launched without the instance profile (stack not deployed, or a fresh account) benches exactly as before — the drain gives up quietly and the laptop-side collectors (`run.sh` polling, `watch.sh`) remain the collectors of record.
 
+## Live backend (#59)
+
+The next tier of the live path: `crates/runner-live` (#60) is a consumer backend that holds a CloudWatch **Live Tail** session over the run log group — a streaming call, opened only while at least one client is attached — parses lines into typed events, ring-buffers per-run history, and serves it all as **SSE** with `Last-Event-ID` resume (`GET /runs/{run-id}/events`: history first, then live, one response — the Vercel `?follow=1` shape). Auth is the same Cognito id token the SPA already holds, verified against the pool JWKS from the site's published `config.json`; the ingest transport sits behind a `LogSource` seam so a direct box→backend stream can swap in later without touching the parser, buffer, or client leg.
+
+It runs on `RunnerBackendStack` (`infra/runner/lib/backend-stack.ts`): a t4g.nano (Ubuntu 24.04 arm64 — glibc-matched to the arm CI runners that build the binary) behind Caddy, which owns TLS on `live.runner.johncarmack.com`; an EIP keeps the address stable across instance replacements. The binary ships as a CDK asset whose hash rides in user-data, so `userDataCausesReplacement` turns every new binary into a fresh instance built by one boot script. The instance role reads the run log group and its own asset, and nothing else; there is no ssh — port 22 is closed and debugging goes through SSM Session Manager (`aws ssm start-session --target <InstanceId>`). The SPA still reads CloudWatch directly today; switching its live view to the SSE stream is the next slice.
+
+## Backend deploy
+
+First deploy is deliberately by hand (it creates the EIP and DNS record): `just runner::deploy-backend` — cross-builds `runner-live` for aarch64-linux in Docker (`rust:1-bookworm`, cached in named volumes), then deploys the stack; `just runner::diff-backend` previews. After that, set the `BACKEND_DEPLOY_ENABLED=true` repo variable and `.github/workflows/backend.yml` redeploys on every push to main touching the crate or the stack, building natively on an arm64 runner with the same OIDC role as deploy.yml.
+
 ## Dev
 
 - `pnpm install && pnpm dev` here, or `pnpm dev:runner` from the workspace root
@@ -38,7 +48,7 @@ Live at <https://runner.johncarmack.com>. CI deploys on every push to `main` tha
 3. ~~Auth (AWS SSO)~~ (#55)
 4. ~~Live log drain into this UI~~ (#56 — CloudWatch Logs + identity-pool polling, not a websocket)
 5. ~~Runner image build/push to ECR in CI~~ (this — see Runner image below)
-6. Console-side dispatch: launch a box from the console (run API + wiring the ActionBar to it)
+6. Console-side dispatch (#59), in slices: ~~the `runner-live` SSE backend~~ (#60), ~~its stack~~ (this — see Live backend above); next the SPA's switch to the SSE stream, then the run API + ActionBar wiring
 7. Tighten and harden
 
 ## Runner image

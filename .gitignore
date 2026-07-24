@@ -25,6 +25,14 @@ services/cloud-runner/results/
 node_modules/
 /apps/*/dist/
 
+# Cross-built runner-live binary the backend stack ships as a CDK asset
+# (just runner::build-backend / .github/workflows/backend.yml)
+/infra/runner/dist-backend/
+
+# CDK context cache: embeds the AWS account id, and CI re-derives it through
+# the bootstrap lookup role — never commit it.
+cdk.context.json
+
 # Local copy of the deployed runner auth config, for exercising real sign-in
 # from `pnpm dev` (apps/runner/README.md -> Auth). The deploy publishes its
 # own config.json, so this never ships.
