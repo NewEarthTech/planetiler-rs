@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>planetiler-rs runner</title>
+    <meta
+      name="description"
+      content="Console for planetiler-rs cloud runs: requisition a box, dispatch a job, watch the live log, destroy the box."
+    />
+    <script>
+      // Set theme before first paint to avoid a flash. ?theme=dark|light
+      // overrides (handy for screenshots and sharing).
+      const param = new URLSearchParams(location.search).get("theme");
+      const stored = localStorage.getItem("runner-theme");
+      const dark =
+        param === "dark" ||
+        (param !== "light" &&
+          (stored === "dark" ||
+            (stored === null &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches)));
+      document.documentElement.classList.toggle("dark", dark);
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
