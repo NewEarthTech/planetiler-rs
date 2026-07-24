@@ -5,7 +5,7 @@ import * as dotenv from "dotenv";
 import * as cdk from "aws-cdk-lib";
 import { TilebenchStack } from "../lib/site-stack";
 
-// Load infra/.env (gitignored) before reading config, regardless of cwd.
+// Load infra/docs/.env (gitignored) before reading config, regardless of cwd.
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
 const app = new cdk.App();
@@ -21,14 +21,14 @@ new TilebenchStack(app, "TilebenchStack", {
   env: { account, region: "us-east-1" },
   domainName: process.env.TILEBENCH_DOMAIN ?? "tilebench.johncarmack.com",
   zoneName: process.env.TILEBENCH_ZONE_NAME ?? "johncarmack.com",
-  // The parent hosted zone id, from infra/.env (kept out of the repo).
+  // The parent hosted zone id, from infra/docs/.env (kept out of the repo).
   zoneId: requireEnv("TILEBENCH_ZONE_ID"),
 });
 
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
-    throw new Error(`${name} is required — set it in site/infra/.env (see .env.example)`);
+    throw new Error(`${name} is required — set it in infra/docs/.env (see .env.example)`);
   }
   return value;
 }
