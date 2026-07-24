@@ -19,9 +19,39 @@ PLANETILER_VERSION=${3:-v0.10.2}
 
 cd "$HOME"
 echo RUNNING > status
+
+# Ship results/ + the durable logs to a run-keyed S3 prefix before the box
+# dies — the collection path for a console-dispatched box, which has no ssh
+# for watch.sh to scp from (#59). Runs on FAIL too: a failed run's stderr and
+# mem trajectory are the valuable part (the C/D lesson). Best-effort by
+# design: no RUN_ID in the dispatch env (an old-style dispatch) or no
+# instance profile and the run's outcome is unchanged — watch.sh still
+# collects by scp either way.
+ship_results() {
+  [ -n "${RUN_ID:-}" ] || return 0
+  # aws via snap, same reasoning as drain.sh (apt may not own the box's
+  # locks). `|| true` so a failed install can't errexit the EXIT trap.
+  command -v aws >/dev/null || sudo snap install aws-cli --classic >/dev/null 2>&1 || true
+  command -v aws >/dev/null || { echo "no aws cli; results stay on the box"; return 0; }
+  local dest="s3://${RESULTS_BUCKET:-planetiler-rs-run-results}/$RUN_ID"
+  local S3=(aws --region "${RESULTS_REGION:-us-east-1}" s3 cp --no-progress)
+  if [ -d results ] && "${S3[@]}" --recursive results/ "$dest/results/" >/dev/null 2>&1; then
+    echo "results shipped: $dest/results/"
+  else
+    echo "results ship to $dest failed (no instance profile?)"
+  fi
+  local f
+  for f in planet-rs.stderr planet-mem.log job.log; do
+    [ -f "$f" ] && "${S3[@]}" "$f" "$dest/$f" >/dev/null 2>&1 || true
+  done
+}
+
 # Any exit that didn't reach DONE — set -e, explicit exit, signal, OOM kill —
 # marks FAIL so the watcher stops instead of polling RUNNING forever.
-finalize() { [ "$(cat status 2>/dev/null)" = DONE ] || echo FAIL > status; }
+finalize() {
+  [ "$(cat status 2>/dev/null)" = DONE ] || echo FAIL > status
+  ship_results
+}
 trap finalize EXIT
 
 mkdir -p results

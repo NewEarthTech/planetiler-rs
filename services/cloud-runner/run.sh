@@ -175,11 +175,13 @@ if [ "${#PROFILE_ARGS[@]}" -gt 0 ]; then
 fi
 
 # nohup with stdin still attached leaves the dispatching ssh hanging; the
-# `< /dev/null` is load-bearing, not decoration.
+# `< /dev/null` is load-bearing, not decoration. RUN_ID in the job's env keys
+# the S3 results upload the runner does before the box dies; it lines up with
+# the drain's log streams so a run is one id everywhere.
 if [ "$JOB" = planet ]; then
   echo "== start job: planet $REF_A"
   ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-    "chmod +x $RUNNER && nohup ./$RUNNER '$REF_A' '$PLANET_URL' > job.log 2>&1 < /dev/null & echo dispatched"
+    "chmod +x $RUNNER && nohup env RUN_ID='$RUN_ID' ./$RUNNER '$REF_A' '$PLANET_URL' > job.log 2>&1 < /dev/null & echo dispatched"
   # Drop the cleanup trap outright rather than flipping FETCHED: the box has to
   # outlive this script, and neither branch of cleanup is what we want here.
   trap - EXIT
@@ -192,6 +194,7 @@ if [ "$JOB" = planet ]; then
 
   watch + collect:  $HERE/watch.sh $IP $MAX_HOURS
   watch live:       $LIVE_HINT
+  results (s3):     s3://planetiler-rs-run-results/$RUN_ID/ (shipped by the box on DONE/FAIL, needs the instance profile)
   peek at the log:  ssh -i $KEY_FILE ubuntu@$IP 'tail -f job.log'
   kill it now:      aws --region $REGION ec2 terminate-instances --instance-ids $IID
 
@@ -201,7 +204,7 @@ fi
 
 echo "== start job: $JOB $REF_A $REF_B ($ROUNDS rounds)"
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-  "chmod +x remote.sh && nohup ./remote.sh '$JOB' '$REF_A' '$REF_B' '$ROUNDS' > job.log 2>&1 < /dev/null & echo dispatched"
+  "chmod +x remote.sh && nohup env RUN_ID='$RUN_ID' ./remote.sh '$JOB' '$REF_A' '$REF_B' '$ROUNDS' > job.log 2>&1 < /dev/null & echo dispatched"
 
 echo "== poll (status + log tail)"
 LAST_LINES=0

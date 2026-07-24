@@ -88,10 +88,12 @@ ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
   "chmod +x drain.sh && nohup env DRAIN_POLL=1 ./drain.sh '$RUN_ID' > drain.log 2>&1 < /dev/null & echo 'drain started'"
 echo "live console: https://runner.johncarmack.com (run $RUN_ID)"
 
+# RUN_ID in the job's env keys the S3 results upload the runner does before
+# the box dies; it lines up with the drain's log streams.
 if [ "$JOB" = planet ]; then
   echo "== start job: planet $REF_A"
   ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-    "chmod +x $RUNNER && nohup ./$RUNNER '$REF_A' '$PLANET_URL' > job.log 2>&1 < /dev/null & echo dispatched"
+    "chmod +x $RUNNER && nohup env RUN_ID='$RUN_ID' ./$RUNNER '$REF_A' '$PLANET_URL' > job.log 2>&1 < /dev/null & echo dispatched"
   echo "== detached; collect with: $HERE/watch.sh $IP $MAX_HOURS"
   trap - EXIT
   exit 0
@@ -99,7 +101,7 @@ fi
 
 echo "== start job: $JOB $REF_A $REF_B ($ROUNDS rounds)"
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-  "chmod +x remote.sh && nohup ./remote.sh '$JOB' '$REF_A' '$REF_B' '$ROUNDS' > job.log 2>&1 < /dev/null & echo dispatched"
+  "chmod +x remote.sh && nohup env RUN_ID='$RUN_ID' ./remote.sh '$JOB' '$REF_A' '$REF_B' '$ROUNDS' > job.log 2>&1 < /dev/null & echo dispatched"
 
 echo "== poll (status + log tail)"
 LAST_LINES=0

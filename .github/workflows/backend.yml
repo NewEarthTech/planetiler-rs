@@ -14,6 +14,12 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "infra/runner/**"
+      # The console stack shares the infra dir but not this stack: a
+      # site-stack-only merge must not risk an instance swap, because every
+      # replacement re-issues the Let's Encrypt cert (#65, 5/week limit).
+      # backend-stack.ts only imports fixed-name constants from it; if one of
+      # those ever changes, deploy by hand (workflow_dispatch).
+      - "!infra/runner/lib/site-stack.ts"
       - ".github/workflows/backend.yml"
   workflow_dispatch:
 
