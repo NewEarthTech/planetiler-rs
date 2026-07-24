@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
+import type { LiveRun, LiveStatus } from "@/hooks/useLiveRun";
 import { EMPTY_FEED, type Feed, nextFeed } from "@/lib/feed";
 import { type LiveConfig, streamRun } from "@/lib/live";
 import { createLogParser, type LogLine } from "@/lib/log";
 import { LIVE_WINDOW_MS, type MemSample, parseMemSample, type RunSummary } from "@/lib/runs";
-import type { LiveRun, LiveStatus } from "@/hooks/useLiveRun";
 
 /**
  * Batch UI updates: events arrive per line over the socket (a backfill can

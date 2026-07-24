@@ -68,9 +68,10 @@ export async function streamRun(
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        let split: number;
         // Frames are delimited by a blank line; keep the trailing partial.
-        while ((split = buffer.indexOf("\n\n")) >= 0) {
+        for (;;) {
+          const split = buffer.indexOf("\n\n");
+          if (split < 0) break;
           const event = parseSseFrame(buffer.slice(0, split));
           buffer = buffer.slice(split + 2);
           // Skip anything at or before the resume point (the server already
