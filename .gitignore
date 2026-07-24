@@ -19,4 +19,4 @@ CLAUDE.local.md
 /data/
 
 # Cloud benchmark run artifacts (fetched per run; curated numbers go to bench/results)
-parity/cloud/results/
+services/cloud-runner/results/

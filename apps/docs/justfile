@@ -6,14 +6,14 @@ build:
     bun run build
 
 # Build + publish: the CDK BucketDeployment ships dist/ and invalidates
-# CloudFront as part of the deploy. Requires default AWS creds and infra/.env
-# (see infra/.env.example).
+# CloudFront as part of the deploy. Requires default AWS creds and
+# ../../infra/docs/.env (see .env.example there).
 deploy: build
-    cd infra && bun install && npx cdk deploy --require-approval never
+    cd ../../infra/docs && bun install && npx cdk deploy --require-approval never
 
 # Show what a deploy would change without applying it.
 diff: build
-    cd infra && bun install && npx cdk diff
+    cd ../../infra/docs && bun install && npx cdk diff
 
 
 

@@ -5,7 +5,7 @@
 //! produce tiles, the only wired subcommand is `measure`, which times an
 //! arbitrary command — the exact capture the Rust-vs-Java head-to-head will use
 //! once both sides can generate a tile. The comparison table and semantic-MVT
-//! diff land with the decoder in Phase 1 (see `docs/ARCHITECTURE.md` and
+//! diff land with the decoder in Phase 1 (see `ARCHITECTURE.md` and
 //! `parity/README.md`).
 
 use std::path::PathBuf;

@@ -1,6 +1,6 @@
 /**
  * Benchmark dataset, transcribed from planetiler-rs `bench/results/` (laptop
- * history, committed) and the EC2 runner's fetched logs (`parity/cloud/results/`,
+ * history, committed) and the EC2 runner's fetched logs (`services/cloud-runner/results/`,
  * gitignored run artifacts — curated numbers land in `bench/results/`).
  * Task everywhere: OSM extract → osm-qa-style MBTiles (single `osm` layer),
  * z12 (country/continent) or z12–14 (city/state). Upstream pinned at v0.10.2.
@@ -66,7 +66,7 @@ export const RUNS: Run[] = [
   { extract: "europe", tool: "planetiler-rs", machine: "laptop-12c", wallS: 2496, peakRssMB: 54579, date: "2026-07-02", note: "round 2: parallel write + relation capture off heap" },
   { extract: "europe", tool: "planetiler-java", machine: "laptop-12c", wallS: 1062, peakRssMB: 76698, date: "2026-07-01", note: "stock defaults" },
 
-  // — dedicated EC2 runs (parity/cloud/results/) —
+  // — dedicated EC2 runs (services/cloud-runner/results/) —
   // Geofabrik re-fetched on the run date, so this is a later extract vintage
   // than the laptop row above (21324 tiles vs 21472) as well as different
   // hardware. Same flags, but not a like-for-like pair with the laptop number.

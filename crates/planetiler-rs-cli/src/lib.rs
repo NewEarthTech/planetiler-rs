@@ -5,7 +5,7 @@
 //! render pipeline. This crate is a from-scratch Rust reimplementation whose
 //! sole justification is beating the Java original on wall-clock time and peak
 //! memory, so every capability lands alongside a head-to-head benchmark (see
-//! [`bench`], `src/bin/bench.rs`, and `docs/ARCHITECTURE.md`).
+//! [`bench`], `src/bin/bench.rs`, and `ARCHITECTURE.md`).
 //!
 //! # Module map
 //!
@@ -14,14 +14,14 @@
 //! [`model::Entry`] records, [`collection`] sorts them generically, and
 //! [`archive`] consumes them in tile order. Modules whose docs say *(planned)*
 //! are declared for orientation but not yet implemented — see the phase they
-//! belong to in `docs/ARCHITECTURE.md`.
+//! belong to in `ARCHITECTURE.md`.
 
 pub mod bench;
 pub mod error;
 pub mod geom;
 pub mod model;
 
-// --- Pipeline stages (implemented incrementally; see docs/ARCHITECTURE.md) ---
+// --- Pipeline stages (implemented incrementally; see ARCHITECTURE.md) ---
 pub mod archive;
 pub mod cli;
 pub mod collection;

@@ -20,7 +20,7 @@ export interface TilebenchStackProps extends cdk.StackProps {
 /**
  * The tilebench.johncarmack.com static dashboard: a private S3 bucket served
  * only through CloudFront (OAC), a DNS-validated certificate, alias records in
- * the parent zone, and a bucket deployment that publishes `site/dist` and
+ * the parent zone, and a bucket deployment that publishes `apps/docs/dist` and
  * invalidates on every `cdk deploy`.
  */
 export class TilebenchStack extends cdk.Stack {
@@ -82,9 +82,9 @@ export class TilebenchStack extends cdk.Stack {
     });
 
     // Publish the built site and invalidate on deploy. `bun run build` must
-    // have produced site/dist before `cdk deploy`.
+    // have produced apps/docs/dist before `cdk deploy`.
     new s3deploy.BucketDeployment(this, "DeploySite", {
-      sources: [s3deploy.Source.asset(path.join(__dirname, "..", "..", "dist"))],
+      sources: [s3deploy.Source.asset(path.join(__dirname, "..", "..", "..", "apps", "docs", "dist"))],
       destinationBucket: bucket,
       distribution,
       distributionPaths: ["/*"],
