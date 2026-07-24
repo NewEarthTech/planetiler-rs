@@ -2,6 +2,8 @@
 
 The H-A fix (#35) survives the planet. First complete planetiler-rs planet run -- z12, the full 93.9 GB `planet-260713.osm.pbf`, clean exit -- followed by the pinned Planetiler v0.10.2 on the same box and input. The run doubles as the instrumented probe the probe-first rule requires: it names the critical path per phase, with per-phase CPU utilization from the memory sampler, and it licenses the next two parallelism campaigns. Raw receipts: `planet-run-20260722.stderr`, `planet-run-20260722-mem.log`, `planet-run-20260722-report.txt`.
 
+**Visual companion: [`planet-worst-cases.html`](planet-worst-cases.html)** -- open it in a browser. It draws this run's four worst cases to scale (phase timeline against Java's whole run, the ways funnel, bbox over-prediction, the flush high-water) and then the campaign that followed: six experiments against worst cases 1 and 2, three parked and three shipped, with the real before/after code for each and the pattern that separates them.
+
 ## Configuration
 
 - Box: r7gd.8xlarge (32-core Graviton3, 247 GB, 1.7 TB instance-store NVMe scratch), us-west-2, kernel 6.17.0-1019-aws; rustc 1.97.1; OpenJDK 21.0.11.
