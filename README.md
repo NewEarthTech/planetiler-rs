@@ -66,7 +66,7 @@ cargo run --release --bin bench -- render 12 2132 1493 out.svg ours.mbtiles thei
 
 ## Design, briefly
 
-Streaming source → profile → render (project, slice into covering tiles, clip, quantize) → external merge sort keyed by tile → group → MVT encode + gzip → MBTiles. Peak memory is bounded by one render batch, the sort buffer, the node store you chose, and one decode window: never the whole input, never all the tiles. PBF blocks decode in parallel windows with ordered consumption, so output is deterministic down to the byte across every storage mode and thread count. `docs/ARCHITECTURE.md` has the long version.
+Streaming source → profile → render (project, slice into covering tiles, clip, quantize) → external merge sort keyed by tile → group → MVT encode + gzip → MBTiles. Peak memory is bounded by one render batch, the sort buffer, the node store you chose, and one decode window: never the whole input, never all the tiles. PBF blocks decode in parallel windows with ordered consumption, so output is deterministic down to the byte across every storage mode and thread count. `ARCHITECTURE.md` has the long version.
 
 ## License
 
