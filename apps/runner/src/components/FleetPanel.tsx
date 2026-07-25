@@ -7,19 +7,34 @@ import { BoxChip } from "@/components/BoxChip";
 import { BoxList } from "@/components/BoxList";
 import { Field } from "@/components/Field";
 import type { Fleet } from "@/hooks/useFleet";
-import { boxAffordances, DISPATCHABLE_JOB } from "@/lib/fleet";
+import { boxAffordances, DISPATCHABLE_JOBS, type DispatchableJob } from "@/lib/fleet";
 import { checkIdent, checkMaxHours, MAX_HOURS_MAX, MAX_HOURS_MIN } from "@/lib/runApi";
 
-/** run-api's own defaults (jobs.rs:42-56), restated so the form shows them. */
 const DEFAULT_IMAGE_TAG = "main";
-const DEFAULT_MAX_HOURS = "14";
-const DEFAULT_INSTANCE_TYPE = "r7gd.8xlarge";
+
 /**
- * Rough hourly rate for the default box, backed out of the ~$5 recorded for
- * the 2 h 55 m planet run in bench/results/planet-preflight.md. It exists to
- * make the ceiling legible before clicking, not to be a billing figure.
+ * run-api's own per-job defaults (jobs.rs), restated so the form shows them.
+ * The hourly figures make the ceiling legible before clicking, not a bill:
+ * planet is backed out of the ~$5 recorded for the 2 h 55 m run in
+ * bench/results/planet-preflight.md; smoke is the r7gd.large on-demand rate.
  */
-const PLANET_HOURLY_USD = 1.7;
+const JOB_PRESETS: Record<
+  DispatchableJob,
+  { instanceType: string; maxHours: string; hourlyUsd: number; blurb: string }
+> = {
+  planet: {
+    instanceType: "r7gd.8xlarge",
+    maxHours: "14",
+    hourlyUsd: 1.7,
+    blurb: "the full 94 GB planet build vs upstream",
+  },
+  "planet-smoke": {
+    instanceType: "r7gd.large",
+    maxHours: "1",
+    hourlyUsd: 0.15,
+    blurb: "the same pipeline on monaco — proves every leg in minutes",
+  },
+};
 
 interface FleetPanelProps {
   fleet: Fleet;
@@ -35,8 +50,18 @@ interface FleetPanelProps {
  */
 export function FleetPanel({ fleet, selectedBoxId, onSelectBox, onWatchRun }: FleetPanelProps) {
   const [showOptions, setShowOptions] = useState(false);
+  const [job, setJob] = useState<DispatchableJob>("planet");
   const [imageTag, setImageTag] = useState(DEFAULT_IMAGE_TAG);
-  const [maxHours, setMaxHours] = useState(DEFAULT_MAX_HOURS);
+  const [maxHours, setMaxHours] = useState(JOB_PRESETS.planet.maxHours);
+  const preset = JOB_PRESETS[job];
+
+  // Picking a job re-arms its own failsafe default: a 14 h ceiling carried
+  // from planet onto a smoke box would be exactly the stale-form lie the
+  // shakedown flagged, in the other direction.
+  const selectJob = (next: DispatchableJob) => {
+    setJob(next);
+    setMaxHours(JOB_PRESETS[next].maxHours);
+  };
 
   const selectedBox = fleet.boxes?.find((box) => box.id === selectedBoxId) ?? null;
   const terminating = selectedBox ? fleet.terminating.has(selectedBox.id) : false;
@@ -52,7 +77,7 @@ export function FleetPanel({ fleet, selectedBoxId, onSelectBox, onWatchRun }: Fl
       setShowOptions(true);
       return;
     }
-    const id = await fleet.requisition({ job: DISPATCHABLE_JOB, imageTag, maxHours: hours });
+    const id = await fleet.requisition({ job, imageTag, maxHours: hours });
     if (id) onSelectBox(id);
   };
 
@@ -68,8 +93,8 @@ export function FleetPanel({ fleet, selectedBoxId, onSelectBox, onWatchRun }: Fl
         <div className="flex flex-col gap-1">
           <CardTitle>Fleet</CardTitle>
           <CardDescription>
-            {DISPATCHABLE_JOB} runs only until image.yml builds branch images; A/B stays on the
-            laptop path.
+            planet runs and their smoke rehearsal; A/B stays on the laptop path until its dispatch
+            wiring lands.
           </CardDescription>
         </div>
         <div className="flex items-center gap-2">
@@ -103,13 +128,26 @@ export function FleetPanel({ fleet, selectedBoxId, onSelectBox, onWatchRun }: Fl
           onDestroy={() => selectedBox && void fleet.destroy(selectedBox.id)}
         >
           <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {DISPATCHABLE_JOBS.map((candidate) => (
+                <Button
+                  key={candidate}
+                  variant={candidate === job ? "solid" : "ghost"}
+                  className="h-7 px-2 font-mono text-xs"
+                  onClick={() => selectJob(candidate)}
+                >
+                  {candidate}
+                </Button>
+              ))}
+              <span className="text-xs text-ink-muted">{preset.blurb}</span>
+            </div>
             <button
               type="button"
               className="w-fit text-xs text-ink-muted underline"
               onClick={() => setShowOptions((open) => !open)}
             >
-              {showOptions ? "hide options" : "options"} · {DEFAULT_INSTANCE_TYPE} · image{" "}
-              {imageTag} · terminates itself after {maxHours} h
+              {showOptions ? "hide options" : "options"} · {preset.instanceType} · image {imageTag}{" "}
+              · terminates itself after {maxHours} h
             </button>
             {showOptions && (
               <div className="grid gap-3 sm:grid-cols-2">
@@ -130,8 +168,8 @@ export function FleetPanel({ fleet, selectedBoxId, onSelectBox, onWatchRun }: Fl
                     maxHoursError
                       ? undefined
                       : `${MAX_HOURS_MIN}-${MAX_HOURS_MAX}; the box self-terminates at the ceiling, about ${fmtUsd(
-                          hours * PLANET_HOURLY_USD,
-                        )} of ${DEFAULT_INSTANCE_TYPE}`
+                          hours * preset.hourlyUsd,
+                        )} of ${preset.instanceType}`
                   }
                 />
               </div>

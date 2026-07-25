@@ -20,8 +20,18 @@ export interface Affordances {
   note: string | null;
 }
 
-/** The only job run-api will requisition or dispatch today (jobs.rs:60-62). */
-export const DISPATCHABLE_JOB = "planet";
+/**
+ * The jobs run-api will requisition or dispatch (jobs.rs `dispatchable`):
+ * the real planet run, and its monaco-sized smoke rehearsal — same pipeline,
+ * same legs, minutes and cents instead of hours and dollars. A/B jobs stay
+ * on the laptop path until their dispatch wiring exists.
+ */
+export const DISPATCHABLE_JOBS = ["planet", "planet-smoke"] as const;
+export type DispatchableJob = (typeof DISPATCHABLE_JOBS)[number];
+
+export function isDispatchableJob(job: string | null): job is DispatchableJob {
+  return job !== null && (DISPATCHABLE_JOBS as readonly string[]).includes(job);
+}
 
 /** Boxes this console launched; only those carry the .box-ready marker. */
 function isConsoleBox(box: BoxView): boolean {
@@ -52,7 +62,7 @@ export function boxAffordances(box: BoxView | null, terminating: boolean): Affor
   const running = box.state === "running";
   return {
     canRequisition: true,
-    canDispatch: ours && box.job === DISPATCHABLE_JOB && running && !going,
+    canDispatch: ours && isDispatchableJob(box.job) && running && !going,
     // Left enabled after a job finishes: the run-id tag outlives the run and
     // the console has no cheap completion signal, so cancelling a finished
     // run is a pkill of nothing rather than something worth gating on.
@@ -67,8 +77,8 @@ function boxNote(box: BoxView, going: boolean, ours: boolean, running: boolean):
   if (!ours) {
     return "laptop-dispatched box: watch and destroy only. The API refuses to dispatch onto boxes it didn't requisition.";
   }
-  if (box.job && box.job !== DISPATCHABLE_JOB) {
-    return "A/B jobs need a branch-built candidate image — dispatch them from the laptop path until image.yml builds those.";
+  if (box.job && !isDispatchableJob(box.job)) {
+    return "A/B dispatch isn't wired yet — those runs still go out from the laptop path.";
   }
   if (!box.job) return "no job tag: the API will refuse a dispatch.";
   if (box.state === "pending") return "still booting — the image pull takes about a minute.";
