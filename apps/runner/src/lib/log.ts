@@ -14,6 +14,15 @@ export interface LogLine {
 
 const LINE_RE = /^(\S+Z)\s+(INFO|WARN)\s+(\S+):\s+(.*)$/;
 const FIELD_RE = /([a-z0-9_]+)=(\S+)/g;
+/**
+ * tracing's SGR color/style sequences. Every cloud run's stderr carries them
+ * (the binary wrote ANSI regardless of destination until it gated on a tty),
+ * and a single escape code before the timestamp fails LINE_RE for the whole
+ * stream — no offsets, no phase markers, no counters. Strip before parsing;
+ * already-clean lines (the demo fixture) pass through untouched.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: the ESC byte is the point
+const ANSI_RE = /\u001b\[[0-9;]*m/g;
 
 function parseTail(tail: string): { message: string; fields: Record<string, string> } {
   const fields: Record<string, string> = {};
@@ -36,16 +45,17 @@ export function createLogParser(): (raw: string) => LogLine | null {
   let startMs: number | null = null;
   let lastOffsetS = 0;
   return (raw: string) => {
-    if (raw.trim() === "") return null;
-    const match = raw.match(LINE_RE);
+    const line = raw.replace(ANSI_RE, "");
+    if (line.trim() === "") return null;
+    const match = line.match(LINE_RE);
     if (!match) {
       return {
         offsetS: lastOffsetS,
         time: "",
         level: "INFO",
         target: "",
-        tail: raw,
-        message: raw,
+        tail: line,
+        message: line,
         fields: {},
       };
     }

@@ -197,8 +197,15 @@ fn parse_bounds(spec: &str) -> anyhow::Result<(f64, f64, f64, f64)> {
 }
 
 /// Install a `tracing` subscriber honouring `RUST_LOG` (defaults to `info`).
+/// ANSI color only when stdout is a terminal: every cloud run captures stdout
+/// to a file that the drain ships to CloudWatch and the console parses, and
+/// escape codes there broke the timestamp match on every line.
 fn init_tracing() {
+    use std::io::IsTerminal;
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(std::io::stdout().is_terminal())
+        .try_init();
 }
