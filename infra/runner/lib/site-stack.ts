@@ -204,6 +204,11 @@ export class RunnerConsoleStack extends cdk.Stack {
     const boxRole = new iam.Role(this, "BenchBoxRole", {
       assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
       description: "planetiler-rs bench box: write run logs to the run log group",
+      managedPolicies: [
+        // Console-dispatched boxes have no ssh at all: job start/cancel is
+        // SSM Run Command (crates/run-api), which needs the agent registered.
+        iam.ManagedPolicy.fromAwsManagedPolicyName("AmazonSSMManagedInstanceCore"),
+      ],
     });
     boxRole.addToPolicy(
       new iam.PolicyStatement({

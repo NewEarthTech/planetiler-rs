@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# Runs ON the planet benchmark instance (launched by run.sh's `planet` job).
+# Runs ON the planet benchmark instance (launched by run.sh's `planet` job over
+# ssh, or by the run-api dispatch Lambda over SSM). Console dispatch sets
+# PTRS_BIN to the CLI lifted prebuilt out of the runner image at requisition:
+# no toolchain, no bundle, no build — REF then merely labels the run (the
+# image tag/sha). Without PTRS_BIN, laptop behavior is unchanged.
 #
 # Unlike remote.sh this is not an A/B: it is the first whole-planet run, so the
 # question is "does it complete, at what cost" against pinned upstream on the
@@ -59,14 +63,23 @@ REPORT="results/planet-$(date -u +%Y%m%d-%H%M%S).txt"
 say() { echo "$@" | tee -a "$REPORT"; }
 
 echo "== deps"
+# PTRS_BIN (console dispatch): the CLI was lifted prebuilt out of the runner
+# image at requisition, so the toolchain never installs — only the run/report
+# deps do. Without it (laptop dispatch) the ref builds from the shipped
+# bundle exactly as before.
 sudo apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  build-essential protobuf-compiler sqlite3 time git curl openjdk-21-jre-headless >/dev/null
-if ! command -v cargo >/dev/null; then
-  curl -fsS https://sh.rustup.rs | sh -s -- -y --profile minimal -q
+if [ -n "${PTRS_BIN:-}" ]; then
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    sqlite3 time curl openjdk-21-jre-headless >/dev/null
+else
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    build-essential protobuf-compiler sqlite3 time git curl openjdk-21-jre-headless >/dev/null
+  if ! command -v cargo >/dev/null; then
+    curl -fsS https://sh.rustup.rs | sh -s -- -y --profile minimal -q
+  fi
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
 fi
-# shellcheck disable=SC1091
-. "$HOME/.cargo/env"
 
 echo "== instance-store scratch"
 for _ in $(seq 1 90); do mountpoint -q /data && break; sleep 2; done
@@ -122,11 +135,17 @@ actual=$(sha256sum "$JAR" | cut -d' ' -f1)
 [ "$expected" = "$actual" ] || {
   echo "jar sha256 mismatch: expected $expected got $actual" >&2; exit 1; }
 
-echo "== build $REF"
-git clone -q repo.bundle repo
-BIN="$HOME/ptrs"
-(cd repo && git checkout -q "$REF" && cargo build --release -q \
-  && cp target/release/planetiler-rs "$BIN")
+if [ -n "${PTRS_BIN:-}" ]; then
+  echo "== prebuilt binary $PTRS_BIN (from the runner image; REF labels the run)"
+  [ -x "$PTRS_BIN" ] || { echo "PTRS_BIN=$PTRS_BIN is not executable" >&2; exit 1; }
+  BIN=$PTRS_BIN
+else
+  echo "== build $REF"
+  git clone -q repo.bundle repo
+  BIN="$HOME/ptrs"
+  (cd repo && git checkout -q "$REF" && cargo build --release -q \
+    && cp target/release/planetiler-rs "$BIN")
+fi
 
 TOKEN=$(curl -fsS -X PUT http://169.254.169.254/latest/api/token \
   -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null || true)
@@ -135,7 +154,11 @@ ITYPE=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" \
 
 say "# planet  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 say "instance: $ITYPE  cores: $(nproc)  kernel: $(uname -sr)  arch: $(uname -m)"
-say "rustc: $(rustc --version)"
+if [ -n "${PTRS_BIN:-}" ]; then
+  say "binary: prebuilt from runner image ($PTRS_BIN)"
+else
+  say "rustc: $(rustc --version)"
+fi
 say "java: $(java -version 2>&1 | head -1)"
 say "ref: $REF  upstream: $PLANETILER_VERSION"
 say "input: $PLANET_URL"
