@@ -47,10 +47,10 @@ mkdir -p /data && mount "$dev" /data && chown ubuntu:ubuntu /data
 set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
 snap install aws-cli --classic
-# snap links binaries into /snap/bin, which reaches shells through a
-# /etc/profile.d entry — cloud-init runs this as root in a non-login shell,
-# so PATH has to pick it up explicitly or every aws call below is a
-# command-not-found. drain.sh guards the same hazard with command -v.
+# Belt and braces, not a fix for a live bug: Ubuntu 24.04 already carries
+# /snap/bin in /etc/environment, so cloud-init's PATH finds the snap. Both
+# the export and the guard are here so a future image that drops it fails
+# on this line with a legible message instead of somewhere downstream.
 export PATH="$PATH:/snap/bin"
 command -v aws >/dev/null || {{ echo "aws cli missing after snap install" >&2; exit 1; }}
 apt-get update -qq
