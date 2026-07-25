@@ -202,9 +202,14 @@ export class RunApiStack extends cdk.Stack {
       // The stable name is the only door; no execute-api URL to leak.
       disableExecuteApiEndpoint: true,
     });
+    // Explicit methods, not ANY: an ANY route also matches OPTIONS, which
+    // sends browser preflights to the JWT authorizer — and preflights never
+    // carry Authorization, so every console call would 401 at the gate.
+    // With no route matching OPTIONS, the gateway's automatic CORS responder
+    // answers preflights itself (verified: ANY gave 401, this gives 204).
     api.addRoutes({
       path: "/{proxy+}",
-      methods: [apigwv2.HttpMethod.ANY],
+      methods: [apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST, apigwv2.HttpMethod.DELETE],
       integration: new HttpLambdaIntegration("Lambda", handler),
     });
 
