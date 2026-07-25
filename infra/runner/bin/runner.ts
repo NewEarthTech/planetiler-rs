@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as dotenv from "dotenv";
 import * as cdk from "aws-cdk-lib";
+import { RunApiStack } from "../lib/api-stack";
 import { RunnerBackendStack } from "../lib/backend-stack";
 import { RunnerConsoleStack } from "../lib/site-stack";
 
@@ -23,6 +24,10 @@ cdk.Tags.of(app).add("ManagedBy", "cdk");
 // ("" in .env or the workflow) disables the advert — the kill switch that
 // drops the console back to CloudWatch polling on the next deploy.
 const liveDomain = process.env.RUNNER_LIVE_DOMAIN ?? "live.runner.johncarmack.com";
+
+// The dispatch API's domain, same pattern: RunApiStack serves it,
+// RunnerConsoleStack advertises it. "" = no dispatch controls in the console.
+const apiDomain = process.env.RUNNER_API_DOMAIN ?? "api.runner.johncarmack.com";
 
 // Each stack only instantiates when its build artifact exists, because
 // synthesizing this app synthesizes every stack in it: the backend workflow
@@ -45,9 +50,27 @@ if (fs.existsSync(consoleDist)) {
     // Only used before SAML is wired; defaults to the repo's commit author.
     ownerEmail: process.env.RUNNER_OWNER_EMAIL ?? "johncarmack@me.com",
     liveUrl: liveDomain ? `https://${liveDomain}` : undefined,
+    runApiUrl: apiDomain ? `https://${apiDomain}` : undefined,
   });
 } else {
   console.warn(`skipping RunnerConsoleStack: ${consoleDist} not found (just runner::build)`);
+}
+
+// The dispatch API (#59). Only instantiated when the Lambda bootstrap is
+// present — same guarded-synth rule as the other two build artifacts.
+const apiDist = path.join(__dirname, "..", "dist-api");
+if (fs.existsSync(path.join(apiDist, "bootstrap")) && apiDomain) {
+  new RunApiStack(app, "RunApiStack", {
+    env: { account, region: "us-east-1" },
+    domainName: apiDomain,
+    zoneName: process.env.RUNNER_ZONE_NAME ?? "johncarmack.com",
+    zoneId: requireEnv("RUNNER_ZONE_ID"),
+    consoleOrigin: `https://${process.env.RUNNER_DOMAIN ?? "runner.johncarmack.com"}`,
+    liveBase: liveDomain ? `https://${liveDomain}` : "",
+    distDir: apiDist,
+  });
+} else {
+  console.warn(`skipping RunApiStack: ${apiDist}/bootstrap not found (just runner::build-api)`);
 }
 
 // The SSE backend (#59). Only instantiated when the cross-built binary is

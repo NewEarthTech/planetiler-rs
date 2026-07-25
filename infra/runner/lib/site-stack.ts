@@ -15,6 +15,7 @@ import * as route53 from "aws-cdk-lib/aws-route53";
 import * as targets from "aws-cdk-lib/aws-route53-targets";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
+import * as ssm from "aws-cdk-lib/aws-ssm";
 import { Construct } from "constructs";
 
 /**
@@ -37,6 +38,20 @@ export const BENCH_IMAGE_REPO = "planetiler-rs-bench";
  * collection path for console-dispatched boxes, which have no ssh for scp.
  */
 export const RUN_RESULTS_BUCKET = "planetiler-rs-run-results";
+/**
+ * The Name tag every bench box carries (run.sh and crates/run-api's
+ * `cloud::BENCH_NAME` both hardcode it). RunApiStack's whole mutation
+ * surface is conditioned on this tag.
+ */
+export const BENCH_NAME_TAG = "planetiler-bench";
+/**
+ * Fixed-name SSM parameters this stack publishes so RunApiStack's JWT
+ * authorizer can find the pool/client without a CloudFormation export —
+ * the same no-cross-stack-import convention as the names above, for values
+ * that are generated rather than chosen.
+ */
+export const USER_POOL_ID_PARAM = "/planetiler-rs/runner/user-pool-id";
+export const SPA_CLIENT_ID_PARAM = "/planetiler-rs/runner/spa-client-id";
 
 export interface RunnerConsoleStackProps extends cdk.StackProps {
   /** Fully-qualified domain the console is served from. */
@@ -61,6 +76,12 @@ export interface RunnerConsoleStackProps extends cdk.StackProps {
    * CloudWatch polling — the kill switch if the backend misbehaves.
    */
   liveUrl?: string;
+  /**
+   * Base URL of the dispatch API (RunApiStack), advertised to the SPA via
+   * config.json. Unset = the console shows no dispatch controls — the kill
+   * switch if the API misbehaves.
+   */
+  runApiUrl?: string;
 }
 
 /**
@@ -169,6 +190,18 @@ export class RunnerConsoleStack extends cdk.Stack {
     // The client can't reference the SAML provider until it exists.
     if (samlIdp) client.node.addDependency(samlIdp);
 
+    // Published for RunApiStack's JWT authorizer (fixed names above).
+    new ssm.StringParameter(this, "UserPoolIdParam", {
+      parameterName: USER_POOL_ID_PARAM,
+      stringValue: pool.userPoolId,
+      description: "runner console Cognito user pool id (read by RunApiStack)",
+    });
+    new ssm.StringParameter(this, "SpaClientIdParam", {
+      parameterName: SPA_CLIENT_ID_PARAM,
+      stringValue: client.userPoolClientId,
+      description: "runner console SPA client id (read by RunApiStack)",
+    });
+
     // No Cognito-local users when federated. Otherwise create the single
     // owner (Cognito emails a temp password; set a real one on first sign-in).
     if (!samlIdp) {
@@ -202,6 +235,9 @@ export class RunnerConsoleStack extends cdk.Stack {
     ];
 
     const boxRole = new iam.Role(this, "BenchBoxRole", {
+      // Fixed like its profile (same name, different IAM namespaces), so
+      // RunApiStack's Lambda can scope iam:PassRole to this exact ARN.
+      roleName: BENCH_BOX_PROFILE,
       assumedBy: new iam.ServicePrincipal("ec2.amazonaws.com"),
       description: "planetiler-rs bench box: write run logs to the run log group",
       managedPolicies: [
@@ -341,6 +377,7 @@ export class RunnerConsoleStack extends cdk.Stack {
             resultsBucket: RUN_RESULTS_BUCKET,
           },
           ...(props.liveUrl ? { live: { url: props.liveUrl } } : {}),
+          ...(props.runApiUrl ? { runApi: { url: props.runApiUrl } } : {}),
         }),
       ],
       destinationBucket: bucket,

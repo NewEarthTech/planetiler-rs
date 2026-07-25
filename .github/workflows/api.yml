@@ -1,0 +1,63 @@
+name: api
+
+# Continuous deployment for the run-api dispatch Lambda (#59): every push to
+# main that touches the crate or its stack builds the aarch64 musl-static
+# bootstrap natively on arm64 (provided.al2023's glibc is older than the
+# runner's, so static sidesteps the mismatch) and redeploys RunApiStack. No
+# AWS keys — same OIDC role and guard pattern as backend.yml: flip
+# API_DEPLOY_ENABLED only after the first deploy has been run by hand (it
+# creates the api.runner DNS record + certificate John should watch land).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/run-api/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "infra/runner/lib/api-stack.ts"
+      - "infra/runner/bin/**"
+      - ".github/workflows/api.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write # mint the OIDC token used to assume the AWS role
+  contents: read
+
+concurrency: api-deploy
+
+jobs:
+  api:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    if: ${{ vars.AWS_DEPLOY_ROLE_ARN != '' && vars.API_DEPLOY_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Build run-api (aarch64 musl static)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+          rustup target add aarch64-unknown-linux-musl
+          cargo build -p run-api --release --locked --target aarch64-unknown-linux-musl
+          mkdir -p infra/runner/dist-api
+          cp target/aarch64-unknown-linux-musl/release/run-api infra/runner/dist-api/bootstrap
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6.2.2
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Deploy RunApiStack
+        working-directory: infra/runner
+        env:
+          RUNNER_ZONE_ID: ${{ vars.RUNNER_ZONE_ID }}
+        run: pnpm exec cdk deploy RunApiStack --require-approval never
