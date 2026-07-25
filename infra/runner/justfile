@@ -37,3 +37,29 @@ deploy-backend: build-backend
 diff-backend: build-backend
     pnpm install
     pnpm exec cdk diff RunnerBackendStack
+
+# Build the run-api Lambda bootstrap (aarch64 musl static — provided.al2023's
+# glibc is older than any host we build on, so static sidesteps the mismatch)
+# into ./dist-api/bootstrap. Same containerized pattern as build-backend.
+build-api:
+    docker run --rm --platform linux/arm64 \
+      -v "$(git rev-parse --show-toplevel)":/src -w /src \
+      -v planetiler-api-target:/target -e CARGO_TARGET_DIR=/target \
+      -v planetiler-api-registry:/usr/local/cargo/registry \
+      rust:1-bookworm \
+      bash -c "apt-get update -qq >/dev/null && apt-get install -y -qq musl-tools >/dev/null \
+        && rustup target add aarch64-unknown-linux-musl >/dev/null 2>&1 \
+        && cargo build -p run-api --release --locked --target aarch64-unknown-linux-musl \
+        && cp /target/aarch64-unknown-linux-musl/release/run-api /src/infra/runner/dist-api-out"
+    mkdir -p dist-api && mv dist-api-out dist-api/bootstrap
+
+# Deploy the dispatch API (#59): Lambda + HTTP API + JWT authorizer at
+# api.runner.johncarmack.com. Needs RunnerConsoleStack deployed first (it
+# publishes the pool/client SSM parameters the authorizer reads).
+deploy-api: build-api
+    pnpm install
+    pnpm exec cdk deploy RunApiStack --require-approval never
+
+diff-api: build-api
+    pnpm install
+    pnpm exec cdk diff RunApiStack
