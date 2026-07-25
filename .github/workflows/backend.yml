@@ -37,8 +37,20 @@ jobs:
     # must have been deployed once by hand (it creates the EIP + DNS record
     # John should watch land). Flip the variable to enable.
     if: ${{ vars.AWS_DEPLOY_ROLE_ARN != '' && vars.BACKEND_DEPLOY_ENABLED == 'true' }}
+    # House rule: every Rust-compiling workflow carries ci.yml's caching
+    # setup (rust-cache for the registry, sccache for compiles).
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
 
       # rustup ships on the hosted runners and honours rust-toolchain.toml;
       # runner-live doesn't touch the protobuf build script, so no protoc.
