@@ -1,3 +1,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/planetiler-rs-cli", "crates/run-api", "crates/runner-live"]
+
+# The run-api Lambda: a network-bound control plane with nothing hot, built
+# on 4-core CI runners where aws-sdk-ec2 at full opt is a 20+ minute crate
+# (it timed out the first api.yml run). opt-level 1 compiles in a fraction
+# of the time and costs nothing observable behind an API Gateway round-trip.
+# The CLI and runner-live keep the stock release profile.
+[profile.lambda]
+inherits = "release"
+opt-level = 1

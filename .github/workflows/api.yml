@@ -29,18 +29,31 @@ concurrency: api-deploy
 jobs:
   api:
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 45
     if: ${{ vars.AWS_DEPLOY_ROLE_ARN != '' && vars.API_DEPLOY_ENABLED == 'true' }}
+    # Same caching setup as ci.yml: aws-sdk-ec2 is enormous, and the first
+    # uncached full-opt build blew the job timeout (exit 143 mid-crate).
+    # The `lambda` profile (opt-level 1) is the other half of that fix.
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: "false"
+
+      - uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Build run-api (aarch64 musl static)
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
           rustup target add aarch64-unknown-linux-musl
-          cargo build -p run-api --release --locked --target aarch64-unknown-linux-musl
+          cargo build -p run-api --profile lambda --locked --target aarch64-unknown-linux-musl
           mkdir -p infra/runner/dist-api
-          cp target/aarch64-unknown-linux-musl/release/run-api infra/runner/dist-api/bootstrap
+          cp target/aarch64-unknown-linux-musl/lambda/run-api infra/runner/dist-api/bootstrap
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
 

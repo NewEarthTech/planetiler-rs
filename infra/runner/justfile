@@ -49,8 +49,8 @@ build-api:
       rust:1-bookworm \
       bash -c "apt-get update -qq >/dev/null && apt-get install -y -qq musl-tools >/dev/null \
         && rustup target add aarch64-unknown-linux-musl >/dev/null 2>&1 \
-        && cargo build -p run-api --release --locked --target aarch64-unknown-linux-musl \
-        && cp /target/aarch64-unknown-linux-musl/release/run-api /src/infra/runner/dist-api-out"
+        && cargo build -p run-api --profile lambda --locked --target aarch64-unknown-linux-musl \
+        && cp /target/aarch64-unknown-linux-musl/lambda/run-api /src/infra/runner/dist-api-out"
     mkdir -p dist-api && mv dist-api-out dist-api/bootstrap
 
 # Deploy the dispatch API (#59): Lambda + HTTP API + JWT authorizer at
