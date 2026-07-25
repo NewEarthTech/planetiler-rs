@@ -148,6 +148,9 @@ async fn requisition(
                 ("job".into(), job.name().into()),
                 ("dispatch".into(), "console".into()),
                 ("image".into(), image_tag.clone()),
+                // The failsafe ceiling actually armed in user-data, so the
+                // box list shows the real clock, not a form default.
+                ("max-hours".into(), max_hours.to_string()),
             ],
             data_ebs_gb,
         })
@@ -196,6 +199,14 @@ async fn dispatch(
     let (region, info) = find_box(&*state.cloud, &id)
         .await?
         .ok_or_else(|| AppError::not_found(format!("no bench box {id}")))?;
+    // The SSM script waits on /home/ubuntu/.box-ready, which only console
+    // requisition writes — a laptop box would take the 202 and then fail on
+    // that wait ~15 minutes later, so refuse it here instead.
+    if info.tag("dispatch") != Some("console") {
+        return Err(AppError::conflict(
+            "box was not requisitioned by the console; dispatch it from the laptop path",
+        ));
+    }
     let job = info
         .tag("job")
         .and_then(Job::parse)
@@ -235,10 +246,18 @@ async fn dispatch(
             &format!("planetiler-rs dispatch {run_id}"),
         )
         .await?;
-    // The run-id tag is how the box list shows what a box is doing.
+    // The run-id tag is how the box list shows what a box is doing; the
+    // dispatch script just re-armed the failsafe, so the ceiling moves too.
     state
         .cloud
-        .tag(&region, &id, &[("run-id".into(), run_id.clone())])
+        .tag(
+            &region,
+            &id,
+            &[
+                ("run-id".into(), run_id.clone()),
+                ("max-hours".into(), max_hours.to_string()),
+            ],
+        )
         .await?;
     tracing::info!(%id, region, run_id, "dispatched");
     Ok((
@@ -303,6 +322,11 @@ pub struct BoxView {
     pub run_id: Option<String>,
     /// "console" for boxes this API launched; absent on laptop dispatches.
     pub dispatch: Option<String>,
+    /// UTC stamp the box wrote once requisition finished (.box-ready). Absent
+    /// while provisioning is still running — EC2 `running` is not readiness.
+    pub ready: Option<String>,
+    /// The failsafe ceiling currently armed on the box, in hours.
+    pub max_hours: Option<u32>,
     pub events_url: Option<String>,
 }
 
@@ -318,6 +342,8 @@ async fn list(State(state): State<AppState>) -> Result<Json<serde_json::Value>, 
                 image: info.tag("image").map(str::to_string),
                 run_id: info.tag("run-id").map(str::to_string),
                 dispatch: info.tag("dispatch").map(str::to_string),
+                ready: info.tag("ready").map(str::to_string),
+                max_hours: info.tag("max-hours").and_then(|h| h.parse().ok()),
                 events_url: info.tag("run-id").map(|run| state.config.events_url(run)),
                 id: info.id,
                 region: region.into(),
@@ -485,6 +511,7 @@ mod tests {
         assert!(spec.user_data.contains("shutdown -h +840"));
         assert!(spec.user_data.contains("planetiler-rs-bench:main"));
         assert!(spec.tags.contains(&("dispatch".into(), "console".into())));
+        assert!(spec.tags.contains(&("max-hours".into(), "14".into())));
         assert!(
             spec.tags
                 .contains(&("Name".into(), cloud::BENCH_NAME.into()))
@@ -544,7 +571,10 @@ mod tests {
         let tagged = fake.tagged.lock().unwrap();
         assert_eq!(
             tagged[0].2,
-            vec![("run-id".to_string(), run_id.to_string())]
+            vec![
+                ("run-id".to_string(), run_id.to_string()),
+                ("max-hours".to_string(), "14".to_string()),
+            ]
         );
     }
 
@@ -553,7 +583,14 @@ mod tests {
         let fake = Arc::new(FakeCloud::default());
         fake.seeded.lock().unwrap().push((
             "us-east-1".into(),
-            bench_box("i-0gb", &[("Name", cloud::BENCH_NAME), ("job", "gb-ab")]),
+            bench_box(
+                "i-0gb",
+                &[
+                    ("Name", cloud::BENCH_NAME),
+                    ("job", "gb-ab"),
+                    ("dispatch", "console"),
+                ],
+            ),
         ));
         let app = router(state(fake.clone()));
         let (status, _) = call(&app, "POST", "/boxes/i-0nope/jobs", None).await;
@@ -561,6 +598,26 @@ mod tests {
         let (status, _) = call(&app, "POST", "/boxes/i-0gb/jobs", None).await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(fake.commands.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_refuses_boxes_the_console_did_not_requisition() {
+        let fake = Arc::new(FakeCloud::default());
+        // A laptop box: right job, but no dispatch tag — its requisition
+        // never writes .box-ready, so the SSM script would hang and fail.
+        fake.seeded.lock().unwrap().push((
+            "us-west-2".into(),
+            bench_box(
+                "i-0laptop",
+                &[("Name", cloud::BENCH_NAME), ("job", "planet")],
+            ),
+        ));
+        let app = router(state(fake.clone()));
+        let (status, body) = call(&app, "POST", "/boxes/i-0laptop/jobs", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(body["error"].as_str().unwrap().contains("laptop path"));
+        assert!(fake.commands.lock().unwrap().is_empty());
+        assert!(fake.tagged.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -607,6 +664,8 @@ mod tests {
         let fake = Arc::new(FakeCloud::default());
         let mut running = planet_tags();
         running.push(("run-id", "planet-20260724-101112"));
+        running.push(("ready", "2026-07-24T10:01:07Z"));
+        running.push(("max-hours", "14"));
         fake.seeded
             .lock()
             .unwrap()
@@ -624,6 +683,8 @@ mod tests {
         let planet = boxes.iter().find(|b| b["id"] == "i-0planet").unwrap();
         assert_eq!(planet["region"], "us-west-2");
         assert_eq!(planet["dispatch"], "console");
+        assert_eq!(planet["ready"], "2026-07-24T10:01:07Z");
+        assert_eq!(planet["maxHours"], 14);
         assert_eq!(
             planet["eventsUrl"],
             "https://live.runner.example/runs/planet-20260724-101112/events"
@@ -631,5 +692,7 @@ mod tests {
         let gb = boxes.iter().find(|b| b["id"] == "i-0gb").unwrap();
         assert_eq!(gb["eventsUrl"], serde_json::Value::Null);
         assert_eq!(gb["dispatch"], serde_json::Value::Null);
+        assert_eq!(gb["ready"], serde_json::Value::Null);
+        assert_eq!(gb["maxHours"], serde_json::Value::Null);
     }
 }

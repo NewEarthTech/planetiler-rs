@@ -64,6 +64,14 @@ docker rm "$c" >/dev/null
 chmod +x /home/ubuntu/*.sh /home/ubuntu/ptrs
 chown ubuntu:ubuntu /home/ubuntu/*.sh /home/ubuntu/ptrs
 touch /home/ubuntu/.box-ready && chown ubuntu:ubuntu /home/ubuntu/.box-ready
+# Mirror the marker into a `ready` instance tag so GET /boxes can report
+# real readiness instead of inferring it from the EC2 lifecycle (which says
+# `running` while this script is still installing docker). After the marker
+# on purpose: a failed tag write must not block dispatch, only the chip.
+tok=$(curl -fsS -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 60" http://169.254.169.254/latest/api/token)
+iid=$(curl -fsS -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/instance-id)
+ireg=$(curl -fsS -H "X-aws-ec2-metadata-token: $tok" http://169.254.169.254/latest/meta-data/placement/region)
+aws ec2 create-tags --region "$ireg" --resources "$iid" --tags "Key=ready,Value=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 "#,
         minutes = req.max_hours * 60,
         repo_region = req.repo_region,
@@ -139,6 +147,20 @@ mod tests {
             );
         }
         assert!(script.find(".box-ready").unwrap() > fail_fast);
+    }
+
+    #[test]
+    fn the_ready_tag_mirrors_the_marker_and_never_precedes_it() {
+        let script = script();
+        // The tag is the console's readiness signal; the marker is dispatch's.
+        // Marker first, so a failed tag write (missing IAM, IMDS hiccup)
+        // degrades the chip, not the box.
+        let tag = script.find("create-tags").unwrap();
+        assert!(tag > script.find("touch /home/ubuntu/.box-ready").unwrap());
+        assert!(script.contains(r#"--tags "Key=ready,Value=$(date -u +%Y-%m-%dT%H:%M:%SZ)""#));
+        // IMDSv2 only — the launch sets http-tokens required.
+        assert!(script.contains("X-aws-ec2-metadata-token-ttl-seconds"));
+        assert!(script.find("latest/api/token").unwrap() < tag);
     }
 
     #[test]
