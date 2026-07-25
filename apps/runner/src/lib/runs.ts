@@ -55,6 +55,20 @@ export function isLive(run: RunSummary): boolean {
   return run.lastEventAt !== null && Date.now() - run.lastEventAt < LIVE_WINDOW_MS;
 }
 
+/**
+ * Which input a run id built, for the replay list's filter. Run ids are
+ * `<job>-<stamp>`, and each job pins one input, so the id is the mapping.
+ * Order matters: planet-smoke- is a prefix collision with planet-.
+ */
+export function runInput(id: string): string {
+  if (id.startsWith("planet-smoke-")) return "monaco";
+  if (id.startsWith("gb-ab-")) return "great britain";
+  if (id.startsWith("europe-ab-")) return "europe";
+  if (id.startsWith("ri-") || id.startsWith("rhode-island-")) return "rhode island";
+  if (id.startsWith("planet-")) return "planet";
+  return "other";
+}
+
 /** The runs the log group knows about, most recently active first. */
 export async function listRuns(
   client: CloudWatchLogsClient,

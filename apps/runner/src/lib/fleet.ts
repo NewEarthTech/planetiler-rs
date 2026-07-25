@@ -1,12 +1,10 @@
 // What the console is allowed to do to a box, and how to label it. Pure
-// derivation over the API's own vocabulary (raw EC2 states and the four tags
+// derivation over the API's own vocabulary (raw EC2 states and the tags
 // crates/run-api writes), kept out of the components so the rules read as
-// rules. RunState stays the demo machine's alphabet — a box lifecycle is a
-// different thing and gets its own chip.
+// rules.
 
 import type { BadgeProps } from "@planetiler-rs/ui/badge";
 import { fmtDuration } from "@planetiler-rs/ui/utils";
-import type { RunState } from "@/lib/feed";
 import type { BoxView } from "@/lib/runApi";
 
 export type ActionKind = "requisition" | "dispatch" | "cancel" | "destroy";
@@ -90,17 +88,6 @@ function boxNote(box: BoxView, going: boolean, ours: boolean, running: boolean):
   }
   if (running && box.runId === null) return "no job dispatched yet.";
   return null;
-}
-
-/** Today's ActionBar gating, unchanged, for the demo replay. */
-export function demoAffordances(state: RunState): Affordances {
-  return {
-    canRequisition: state === "idle",
-    canDispatch: state === "ready" || state === "done" || state === "cancelled",
-    canCancel: state === "running",
-    canDestroy: state !== "idle",
-    note: null,
-  };
 }
 
 export interface BoxChipSpec {
