@@ -47,11 +47,16 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.10
 
+      # -j 2: with four rustc processes the 16 GB runner OOMs — aws-sdk-ec2's
+      # frontend is a multi-GB process on its own, and systemd-oomd SIGTERMs
+      # the job cgroup (both exit-143 failures, at any opt level). Two jobs
+      # keep the giant crate paired with at most one sibling; sccache makes
+      # the serialization cheap on every run after the first.
       - name: Build run-api (aarch64 musl static)
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
           rustup target add aarch64-unknown-linux-musl
-          cargo build -p run-api --profile lambda --locked --target aarch64-unknown-linux-musl
+          cargo build -j 2 -p run-api --profile lambda --locked --target aarch64-unknown-linux-musl
           mkdir -p infra/runner/dist-api
           cp target/aarch64-unknown-linux-musl/lambda/run-api infra/runner/dist-api/bootstrap
 
