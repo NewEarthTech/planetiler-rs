@@ -46,6 +46,11 @@ export function BoxList({ boxes, terminating, selected, onSelect, onWatchRun }: 
                 {box.job ?? "no job"} · {box.instanceType} · {box.region}
               </span>
               {age && <span className="tabular text-xs text-ink-muted">up {age}</span>}
+              {box.maxHours != null && (
+                <span className="tabular text-xs text-ink-muted">
+                  self-terminates ≤{box.maxHours}h
+                </span>
+              )}
               {box.image && <span className="text-xs text-ink-muted">image {box.image}</span>}
               <Badge tone={ours ? "info" : "neutral"}>{ours ? "console" : "laptop"}</Badge>
             </button>

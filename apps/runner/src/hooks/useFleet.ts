@@ -169,6 +169,8 @@ export function useFleet(auth: AuthState): Fleet | null {
         image: created.imageTag,
         runId: null,
         dispatch: "console",
+        ready: null,
+        maxHours: created.maxHours,
         eventsUrl: null,
       });
       return created.id;

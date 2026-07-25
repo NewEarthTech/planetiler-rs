@@ -25,6 +25,14 @@ export interface BoxView {
   runId: string | null;
   /** "console" for boxes this API launched; null on laptop dispatches. */
   dispatch: string | null;
+  /**
+   * UTC stamp the box wrote once requisition finished (.box-ready mirrored
+   * into a tag). Null while provisioning — EC2 `running` is not readiness —
+   * and always null on laptop boxes, which never write the marker.
+   */
+  ready: string | null;
+  /** The failsafe ceiling currently armed on the box, in hours. */
+  maxHours: number | null;
   eventsUrl: string | null;
 }
 

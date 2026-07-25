@@ -32,12 +32,10 @@ function isConsoleBox(box: BoxView): boolean {
  * The gating for a selected box, or for none at all — requisition is never
  * gated on a selection, since it is what creates one.
  *
- * Dispatch and cancel are refused for laptop-dispatched boxes even though the
- * server would accept them: run-api checks only the job tag, but the SSM
- * script waits for /home/ubuntu/.box-ready, which only console requisition
- * writes (commands.rs:79-80, userdata.rs:48). A dispatch there returns 202 and
- * then burns ~15 minutes on the box before failing, so this check is the only
- * guard that exists today.
+ * Dispatch and cancel are refused for laptop-dispatched boxes; run-api 409s
+ * them too (only console requisition writes the .box-ready marker the SSM
+ * script waits on), so this gating is a legible disabled button in front of
+ * the server's own refusal, not the only guard.
  */
 export function boxAffordances(box: BoxView | null, terminating: boolean): Affordances {
   if (!box) {
@@ -67,7 +65,7 @@ export function boxAffordances(box: BoxView | null, terminating: boolean): Affor
 function boxNote(box: BoxView, going: boolean, ours: boolean, running: boolean): string | null {
   if (going) return "terminating — the row clears once EC2 finishes.";
   if (!ours) {
-    return "laptop-dispatched box: watch and destroy only. Console dispatch waits on a marker that only its own requisition writes.";
+    return "laptop-dispatched box: watch and destroy only. The API refuses to dispatch onto boxes it didn't requisition.";
   }
   if (box.job && box.job !== DISPATCHABLE_JOB) {
     return "A/B jobs need a branch-built candidate image — dispatch them from the laptop path until image.yml builds those.";
@@ -76,6 +74,9 @@ function boxNote(box: BoxView, going: boolean, ours: boolean, running: boolean):
   if (box.state === "pending") return "still booting — the image pull takes about a minute.";
   if (box.state === "stopping" || box.state === "stopped") {
     return "stopped: the console can only destroy it.";
+  }
+  if (running && !box.ready && box.runId === null) {
+    return "still provisioning (image pull + script extraction, ~1 min); a dispatch now waits on the box for readiness.";
   }
   if (running && box.runId === null) return "no job dispatched yet.";
   return null;
@@ -98,7 +99,12 @@ export interface BoxChipSpec {
   pulse?: boolean;
 }
 
-/** The EC2 lifecycle, as a chip. `state` is a raw string, so default neutral. */
+/**
+ * The box lifecycle, as a chip. EC2 `running` alone is not readiness — a
+ * console box says "provisioning" until the `ready` tag (the .box-ready
+ * mirror) appears. Laptop boxes never write it, so a running one without a
+ * run-id just says "running": the console can't know whether ssh is busy.
+ */
 export function boxChip(box: BoxView, terminating: boolean): BoxChipSpec {
   if (terminating || box.state === "shutting-down") {
     return { tone: "warn", label: "terminating", pulse: true };
@@ -108,9 +114,11 @@ export function boxChip(box: BoxView, terminating: boolean): BoxChipSpec {
     return { tone: "neutral", label: box.state };
   }
   if (box.state === "running") {
-    return box.runId
-      ? { tone: "info", label: "job dispatched", pulse: true }
-      : { tone: "good", label: "idle — ready" };
+    if (box.runId) return { tone: "info", label: "job dispatched", pulse: true };
+    if (!isConsoleBox(box)) return { tone: "neutral", label: "running" };
+    return box.ready
+      ? { tone: "good", label: "idle — ready" }
+      : { tone: "warn", label: "provisioning", pulse: true };
   }
   return { tone: "neutral", label: box.state };
 }

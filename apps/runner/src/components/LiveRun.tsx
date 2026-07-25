@@ -81,6 +81,7 @@ function LiveRunView({ run, live }: { run: RunSummary; live: LiveRunData }) {
           simElapsedS={live.feed.simElapsedS}
           phaseDone={live.feed.phaseDone}
           counters={live.feed.counters}
+          prepare={live.prepare}
           description="live from the box's log drain — phase widths referenced to the 2026-07-22 planet run"
         />
         <PlanetGlobe />
