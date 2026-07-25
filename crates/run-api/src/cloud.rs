@@ -257,8 +257,11 @@ impl Cloud for AwsCloud {
                         .unwrap_or_default(),
                     launch_time: instance
                         .launch_time()
-                        .and_then(|t| chrono::DateTime::from_timestamp(t.secs(), 0))
-                        .map(|t| t.to_rfc3339()),
+                        .and_then(|t| time::OffsetDateTime::from_unix_timestamp(t.secs()).ok())
+                        .and_then(|t| {
+                            t.format(&time::format_description::well_known::Rfc3339)
+                                .ok()
+                        }),
                     public_ip: instance.public_ip_address().map(str::to_string),
                     tags: instance
                         .tags()

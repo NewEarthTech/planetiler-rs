@@ -10,7 +10,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{delete, get, post};
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -218,7 +217,7 @@ async fn dispatch(
         return Err(AppError::bad_request("maxHours must be 1-24"));
     }
 
-    let run_id = commands::new_run_id(job.name(), Utc::now());
+    let run_id = commands::new_run_id(job.name(), time::OffsetDateTime::now_utc());
     let script = commands::dispatch_script(&Dispatch {
         run_id: &run_id,
         ref_label: &ref_label,
