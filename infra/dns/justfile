@@ -1,0 +1,17 @@
+set shell := ["bash", "-cu"]
+
+# Create/update the planetiler.rs hosted zone. Requires default AWS creds.
+deploy:
+    pnpm install
+    pnpm exec cdk deploy --require-approval never
+
+# Show what a deploy would change without applying it.
+diff:
+    pnpm install
+    pnpm exec cdk diff
+
+# Print the zone's name servers — the values to paste at the registrar.
+ns:
+    aws route53 get-hosted-zone \
+        --id "$(aws route53 list-hosted-zones-by-name --dns-name planetiler.rs --max-items 1 --query 'HostedZones[0].Id' --output text)" \
+        --query 'DelegationSet.NameServers' --output text | tr '\t' '\n'

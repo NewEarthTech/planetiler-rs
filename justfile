@@ -3,5 +3,6 @@
 # e.g. `just runner::deploy`, `just docs::diff`, `just ci::deploy`.
 
 mod ci "infra/ci"
+mod dns "infra/dns"
 mod docs "infra/docs"
 mod runner "infra/runner"
