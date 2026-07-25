@@ -1,5 +1,5 @@
 {
-  "app": "pnpm exec ts-node --prefer-ts-exts bin/tilebench.ts",
+  "app": "pnpm exec ts-node --prefer-ts-exts bin/site.ts",
   "watch": {
     "include": ["**"],
     "exclude": ["node_modules", "cdk.out"]

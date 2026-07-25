@@ -3,7 +3,7 @@ import "source-map-support/register";
 import * as path from "path";
 import * as dotenv from "dotenv";
 import * as cdk from "aws-cdk-lib";
-import { TilebenchStack } from "../lib/site-stack";
+import { PlanetilerRsSiteStack } from "../lib/site-stack";
 
 // Load infra/docs/.env (gitignored) before reading config, regardless of cwd.
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
@@ -13,10 +13,10 @@ const app = new cdk.App();
 // Whatever account your AWS credentials point at. No account id is baked in.
 const account = process.env.CDK_DEFAULT_ACCOUNT;
 
-cdk.Tags.of(app).add("Project", "tilebench");
+cdk.Tags.of(app).add("Project", "planetiler-site");
 cdk.Tags.of(app).add("ManagedBy", "cdk");
 
-new TilebenchStack(app, "TilebenchStack", {
+new PlanetilerRsSiteStack(app, "PlanetilerRsSiteStack", {
   // CloudFront and its ACM certificate must live in us-east-1.
   env: { account, region: "us-east-1" },
   domainName: process.env.SITE_DOMAIN ?? "planetiler.rs",

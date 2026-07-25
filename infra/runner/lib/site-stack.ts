@@ -88,7 +88,7 @@ export interface RunnerConsoleStackProps extends cdk.StackProps {
  * The runner.planetiler.rs console: a private S3 bucket served only through
  * CloudFront (OAC), a DNS-validated certificate, alias records in the parent
  * zone, and a bucket deployment that publishes `apps/runner/dist` and
- * invalidates on every `cdk deploy`. Mirrors the tilebench stack in
+ * invalidates on every `cdk deploy`. Mirrors the site stack in
  * `infra/docs`.
  *
  * Auth mirrors manifest: a Cognito user pool + hosted UI is the OIDC broker
