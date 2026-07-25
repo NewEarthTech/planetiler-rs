@@ -9,7 +9,7 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import { Construct } from "constructs";
 
-export interface TilebenchStackProps extends cdk.StackProps {
+export interface PlanetilerRsSiteStackProps extends cdk.StackProps {
   /** Fully-qualified domain the site is served from (the apex). */
   domainName: string;
   /** Hosted zone the records live in. */
@@ -20,12 +20,12 @@ export interface TilebenchStackProps extends cdk.StackProps {
 /**
  * The planetiler.rs site: a private S3 bucket served only through CloudFront
  * (OAC), a DNS-validated certificate, alias records in the zone, and two
- * bucket deployments — the splash placeholder at the root and the tilebench
+ * bucket deployments — the splash placeholder at the root and the benchmarks
  * dashboard (`apps/docs/dist`, built with `base: "/benchmarks/"`) under
  * `/benchmarks` — with an invalidation on every `cdk deploy`.
  */
-export class TilebenchStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props: TilebenchStackProps) {
+export class PlanetilerRsSiteStack extends cdk.Stack {
+  constructor(scope: Construct, id: string, props: PlanetilerRsSiteStackProps) {
     super(scope, id, props);
 
     const zone = route53.HostedZone.fromHostedZoneAttributes(this, "ParentZone", {
