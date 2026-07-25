@@ -80,9 +80,12 @@ for _ in $(seq 1 180); do [ -f /home/ubuntu/.box-ready ] && break; sleep 5; done
 [ -f /home/ubuntu/.box-ready ] || {{ echo "box never finished requisition (no .box-ready)" >&2; exit 1; }}
 # Reset any previous job + the failsafe clock (redispatch.sh's reset, sans
 # ssh). /data is deliberately untouched: a redispatch reuses the staged input.
+# results/ is cleared: the previous run shipped its own results at its EXIT,
+# and anything left here would ship again under THIS run's S3 prefix (seen
+# live on the first smoke redispatch).
 pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; pkill -f "\./drain\.sh" 2>/dev/null
 sleep 2
-rm -rf /home/ubuntu/status /home/ubuntu/job.log /home/ubuntu/repo /home/ubuntu/planet-mem.log /home/ubuntu/planet-rs.stderr /home/ubuntu/drain.log
+rm -rf /home/ubuntu/status /home/ubuntu/job.log /home/ubuntu/repo /home/ubuntu/planet-mem.log /home/ubuntu/planet-rs.stderr /home/ubuntu/drain.log /home/ubuntu/results
 shutdown -c 2>/dev/null || true
 shutdown -h +{minutes}
 runuser -u ubuntu -- bash -c 'cd && nohup env DRAIN_GROUP={drain_group} DRAIN_REGION={drain_region} DRAIN_POLL=1 ./drain.sh {run_id} > drain.log 2>&1 < /dev/null &'
@@ -184,6 +187,10 @@ mod tests {
         });
         assert!(script.contains(".box-ready"));
         assert!(script.contains("shutdown -h +840"));
+        // The reset clears the previous run's results (already shipped at its
+        // exit) but never /data — the staged input is the redispatch's point.
+        assert!(script.contains("/home/ubuntu/results"));
+        assert!(!script.contains("rm -rf /data"));
         assert!(script.contains(
             "env DRAIN_GROUP=/planetiler-rs/runs DRAIN_REGION=us-east-1 DRAIN_POLL=1 ./drain.sh planet-20260724-101112"
         ));

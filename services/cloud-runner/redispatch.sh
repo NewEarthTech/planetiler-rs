@@ -63,7 +63,7 @@ echo "== reset previous job + failsafe clock"
 # old run first, so nothing holds these open (clearing them mid-run would
 # orphan a live writer's inode instead).
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-  'pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; pkill -f "\./drain\.sh" 2>/dev/null; sleep 2; rm -rf status job.log repo planet-mem.log planet-rs.stderr drain.log; sudo shutdown -c 2>/dev/null; true'
+  'pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; pkill -f "\./drain\.sh" 2>/dev/null; sleep 2; rm -rf status job.log repo planet-mem.log planet-rs.stderr drain.log results; sudo shutdown -c 2>/dev/null; true'
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" "sudo shutdown -h +$((MAX_HOURS * 60)) >/dev/null 2>&1"
 
 echo "== ship repo bundle + runner"
