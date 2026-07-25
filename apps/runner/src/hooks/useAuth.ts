@@ -3,7 +3,9 @@ import {
   type AppConfig,
   beginSignIn,
   CALLBACK_PATH,
+  clearSession,
   completeSignIn,
+  EXPIRY_SKEW_MS,
   loadAppConfig,
   loadSession,
   type RunsConfig,
@@ -11,6 +13,7 @@ import {
   signOut,
 } from "@/lib/auth";
 import type { LiveConfig } from "@/lib/live";
+import type { RunApiConfig } from "@/lib/runApi";
 
 export type AuthState =
   /** Resolving config / finishing the callback exchange. */
@@ -22,11 +25,15 @@ export type AuthState =
       status: "signed-in";
       session: Session;
       signOut: () => void;
+      /** Drop the expired session and go straight back through the hosted UI. */
+      reauth: () => void;
       /** Pool ids the live-runs client federates through. */
       userPoolProvider: string;
       runs: RunsConfig | null;
       /** The SSE backend, when this deploy advertises one. */
       live: LiveConfig | null;
+      /** The dispatch API, when this deploy advertises one. */
+      runApi: RunApiConfig | null;
     }
   | { status: "error"; message: string };
 
@@ -79,13 +86,40 @@ export function useAuth(): AuthState {
   return state;
 }
 
+/** How often to re-check a session that was only validated at boot. */
+const EXPIRY_POLL_MS = 60_000;
+
+/**
+ * Whether the id token has lapsed mid-session. Without this the first symptom
+ * is a 401 the SSE stream hides behind its reconnect loop (lib/live.ts:85).
+ */
+export function useSessionExpired(auth: AuthState): boolean {
+  const expiresAt = auth.status === "signed-in" ? auth.session.expiresAt : null;
+  const [expired, setExpired] = useState(false);
+
+  useEffect(() => {
+    if (expiresAt === null) return;
+    const check = () => setExpired(Date.now() >= expiresAt - EXPIRY_SKEW_MS);
+    check();
+    const timer = setInterval(check, EXPIRY_POLL_MS);
+    return () => clearInterval(timer);
+  }, [expiresAt]);
+
+  return expired;
+}
+
 function signedIn(config: AppConfig, session: Session): AuthState {
   return {
     status: "signed-in",
     session,
     signOut: () => signOut(config.auth),
+    reauth: () => {
+      clearSession();
+      void beginSignIn(config.auth);
+    },
     userPoolProvider: `cognito-idp.${config.auth.region}.amazonaws.com/${config.auth.userPoolId}`,
     runs: config.runs,
     live: config.live,
+    runApi: config.runApi,
   };
 }

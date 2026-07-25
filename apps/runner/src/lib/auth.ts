@@ -9,6 +9,7 @@
 // session is alive.
 
 import type { LiveConfig } from "@/lib/live";
+import type { RunApiConfig } from "@/lib/runApi";
 
 export interface AuthConfig {
   /** Hosted UI base URL, e.g. https://runner-johncarmack.auth.us-east-1.amazoncognito.com */
@@ -25,6 +26,8 @@ export interface RunsConfig {
   region: string;
   logGroup: string;
   identityPoolId: string;
+  /** Where finished runs ship their artifacts; null on deploys predating it. */
+  resultsBucket: string | null;
 }
 
 export interface AppConfig {
@@ -33,6 +36,8 @@ export interface AppConfig {
   runs: RunsConfig | null;
   /** The SSE backend (#59); absent when the deploy doesn't advertise one, in which case the live view falls back to CloudWatch polling. */
   live: LiveConfig | null;
+  /** The dispatch API (#59); absent means no console-side dispatch controls. */
+  runApi: RunApiConfig | null;
 }
 
 export interface Session {
@@ -47,7 +52,7 @@ export const CALLBACK_PATH = "/auth/callback";
 const PKCE_KEY = "runner-auth-pkce";
 const SESSION_KEY = "runner-auth-session";
 /** Treat sessions expiring within a minute as already gone. */
-const EXPIRY_SKEW_MS = 60_000;
+export const EXPIRY_SKEW_MS = 60_000;
 
 /**
  * Fetch /config.json and return its auth + runs blocks, or null when it's
@@ -59,10 +64,11 @@ export async function loadAppConfig(): Promise<AppConfig | null> {
     const res = await fetch("/config.json", { cache: "no-cache" });
     if (!res.ok) return null;
     const parsed: unknown = JSON.parse(await res.text());
-    const { auth, runs, live } = parsed as {
+    const { auth, runs, live, runApi } = parsed as {
       auth?: Partial<AuthConfig>;
       runs?: Partial<RunsConfig>;
       live?: Partial<LiveConfig>;
+      runApi?: Partial<RunApiConfig>;
     };
     if (!auth || typeof auth.domain !== "string" || typeof auth.clientId !== "string") {
       return null;
@@ -80,9 +86,15 @@ export async function loadAppConfig(): Promise<AppConfig | null> {
         typeof runs.region === "string" &&
         typeof runs.logGroup === "string" &&
         typeof runs.identityPoolId === "string"
-          ? { region: runs.region, logGroup: runs.logGroup, identityPoolId: runs.identityPoolId }
+          ? {
+              region: runs.region,
+              logGroup: runs.logGroup,
+              identityPoolId: runs.identityPoolId,
+              resultsBucket: typeof runs.resultsBucket === "string" ? runs.resultsBucket : null,
+            }
           : null,
       live: live && typeof live.url === "string" && live.url ? { url: live.url } : null,
+      runApi: runApi && typeof runApi.url === "string" && runApi.url ? { url: runApi.url } : null,
     };
   } catch {
     return null;
@@ -166,6 +178,11 @@ export function completeSignIn(config: AuthConfig): Promise<Session> {
   return exchangeInFlight;
 }
 
+/** Drop the stored session, leaving the hosted-UI session alone. */
+export function clearSession(): void {
+  sessionStorage.removeItem(SESSION_KEY);
+}
+
 /** The stored session, or null when absent or expiring within the skew. */
 export function loadSession(): Session | null {
   const raw = sessionStorage.getItem(SESSION_KEY);
@@ -173,19 +190,19 @@ export function loadSession(): Session | null {
   try {
     const session = JSON.parse(raw) as Session;
     if (session.expiresAt - EXPIRY_SKEW_MS <= Date.now()) {
-      sessionStorage.removeItem(SESSION_KEY);
+      clearSession();
       return null;
     }
     return session;
   } catch {
-    sessionStorage.removeItem(SESSION_KEY);
+    clearSession();
     return null;
   }
 }
 
 /** Clear the session and end the hosted-UI session too (never returns normally). */
 export function signOut(config: AuthConfig): void {
-  sessionStorage.removeItem(SESSION_KEY);
+  clearSession();
   const params = new URLSearchParams({
     client_id: config.clientId,
     logout_uri: `${location.origin}/`,
