@@ -25,7 +25,9 @@ interface ActionBarProps {
   onDispatch: () => void;
   onCancel: () => void;
   onDestroy: () => void;
-  /** Requisition options, rendered under the buttons. */
+  /** Inline requisition controls beside the button (the job toggle). */
+  requisitionControls?: ReactNode;
+  /** The rest of the requisition form, rendered under its row. */
   children?: ReactNode;
 }
 
@@ -40,6 +42,7 @@ export function ActionBar({
   onDispatch,
   onCancel,
   onDestroy,
+  requisitionControls,
   children,
 }: ActionBarProps) {
   const [armed, setArmed] = useState(false);
@@ -62,14 +65,8 @@ export function ActionBar({
 
   return (
     <div className="flex flex-col gap-2">
+      {/* Scope: the selected box. Everything on this row acts on it. */}
       <div className="flex flex-wrap items-center gap-2">
-        <Button
-          variant="solid"
-          disabled={!affordances.canRequisition || busy}
-          onClick={onRequisition}
-        >
-          {pending === "requisition" ? PENDING_LABEL.requisition : "Requisition box"}
-        </Button>
         <Button disabled={!affordances.canDispatch || busy} onClick={onDispatch}>
           {pending === "dispatch" ? PENDING_LABEL.dispatch : "Dispatch job"}
         </Button>
@@ -113,7 +110,21 @@ export function ActionBar({
         </p>
       )}
 
-      {children}
+      {/* Scope: a new box. The form describes what Requisition will create,
+          separated so it can't read as facts about the selection above. */}
+      <div className="flex flex-col gap-2 border-t border-grid pt-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="solid"
+            disabled={!affordances.canRequisition || busy}
+            onClick={onRequisition}
+          >
+            {pending === "requisition" ? PENDING_LABEL.requisition : "Requisition box"}
+          </Button>
+          {requisitionControls}
+        </div>
+        {children}
+      </div>
     </div>
   );
 }
