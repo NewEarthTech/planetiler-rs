@@ -593,7 +593,7 @@ mod tests {
         assert_eq!((region.as_str(), id.as_str()), ("us-west-2", "i-0abc"));
         // ref defaults to the image tag the box pulled; the URL is the pin.
         assert!(script.contains(&format!(
-            "env RUN_ID={run_id} PTRS_BIN=/home/ubuntu/ptrs ./remote-planet.sh main https://planet.example/planet.osm.pbf"
+            "RUN_ID={run_id} PTRS_BIN=/home/ubuntu/ptrs ./remote-planet.sh main https://planet.example/planet.osm.pbf"
         )));
         assert!(script.contains(&format!("./drain.sh {run_id}")));
         let tagged = fake.tagged.lock().unwrap();

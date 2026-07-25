@@ -67,9 +67,15 @@ pub struct Dispatch<'a> {
 
 /// Start a planet run: wait out requisition, clear any previous job the way
 /// redispatch.sh does, re-arm the failsafe, then start the drain and the job
-/// exactly as the ssh path would — nohup'd, detached, owned by ubuntu. The
-/// `< /dev/null` redirects are what let the SSM invocation complete while
-/// the job lives on (same load-bearing trick as run.sh's ssh dispatch).
+/// as systemd transient units. NOT nohup: the SSM agent tracks every process
+/// the invocation spawns and SIGKILLs whatever is left at executionTimeout —
+/// the first console planet run died to the second, 3600 s after dispatch,
+/// traps unfired (status RUNNING forever, nothing shipped). A transient unit
+/// lives outside the agent's tree, so the invocation completes in seconds
+/// and there is nothing left to reap. Unit names carry the run id: the
+/// reset's pkill has killed the previous main process, but its unit may not
+/// be garbage-collected yet. PATH gains /snap/bin explicitly — systemd units
+/// don't inherit the agent's snap-friendly PATH, and aws lives there.
 pub fn dispatch_script(dispatch: &Dispatch) -> String {
     format!(
         r#"#!/bin/bash
@@ -88,8 +94,8 @@ sleep 2
 rm -rf /home/ubuntu/status /home/ubuntu/job.log /home/ubuntu/repo /home/ubuntu/planet-mem.log /home/ubuntu/planet-rs.stderr /home/ubuntu/drain.log /home/ubuntu/results
 shutdown -c 2>/dev/null || true
 shutdown -h +{minutes}
-runuser -u ubuntu -- bash -c 'cd && nohup env DRAIN_GROUP={drain_group} DRAIN_REGION={drain_region} DRAIN_POLL=1 ./drain.sh {run_id} > drain.log 2>&1 < /dev/null &'
-runuser -u ubuntu -- bash -c 'cd && nohup env RUN_ID={run_id} PTRS_BIN=/home/ubuntu/ptrs ./remote-planet.sh {ref_label} {planet_url} > job.log 2>&1 < /dev/null &'
+systemd-run --collect --unit "ptrs-drain-{run_id}" --uid ubuntu --gid ubuntu --working-directory /home/ubuntu -- bash -c 'exec env PATH="$PATH:/snap/bin" DRAIN_GROUP={drain_group} DRAIN_REGION={drain_region} DRAIN_POLL=1 ./drain.sh {run_id} > drain.log 2>&1'
+systemd-run --collect --unit "ptrs-job-{run_id}" --uid ubuntu --gid ubuntu --working-directory /home/ubuntu -- bash -c 'exec env PATH="$PATH:/snap/bin" RUN_ID={run_id} PTRS_BIN=/home/ubuntu/ptrs ./remote-planet.sh {ref_label} {planet_url} > job.log 2>&1'
 echo "dispatched {run_id}"
 "#,
         minutes = dispatch.max_hours * 60,
@@ -192,14 +198,25 @@ mod tests {
         assert!(script.contains("/home/ubuntu/results"));
         assert!(!script.contains("rm -rf /data"));
         assert!(script.contains(
-            "env DRAIN_GROUP=/planetiler-rs/runs DRAIN_REGION=us-east-1 DRAIN_POLL=1 ./drain.sh planet-20260724-101112"
+            "DRAIN_GROUP=/planetiler-rs/runs DRAIN_REGION=us-east-1 DRAIN_POLL=1 ./drain.sh planet-20260724-101112"
         ));
         assert!(script.contains(
-            "env RUN_ID=planet-20260724-101112 PTRS_BIN=/home/ubuntu/ptrs ./remote-planet.sh 5bb72be https://example.com/planet.osm.pbf"
+            "RUN_ID=planet-20260724-101112 PTRS_BIN=/home/ubuntu/ptrs ./remote-planet.sh 5bb72be https://example.com/planet.osm.pbf"
         ));
         // Drain first, so job.log ships from its first line; both detached.
         assert!(script.find("drain.sh").unwrap() < script.find("remote-planet.sh").unwrap());
-        assert_eq!(script.matches("< /dev/null").count(), 2);
+        // systemd units, never nohup: the SSM agent SIGKILLs everything left
+        // in the invocation's tree at executionTimeout (3600 s default) —
+        // this exact script's processes died to the second on the first
+        // planet proof run. Run-id-suffixed names so a redispatch can't
+        // collide with a not-yet-collected unit.
+        assert!(!script.contains("nohup"));
+        assert_eq!(script.matches("systemd-run --collect").count(), 2);
+        assert!(script.contains(r#"--unit "ptrs-drain-planet-20260724-101112""#));
+        assert!(script.contains(r#"--unit "ptrs-job-planet-20260724-101112""#));
+        // systemd PATH has no /snap/bin, and aws (drain + results ship)
+        // lives there on Ubuntu.
+        assert_eq!(script.matches(r#"PATH="$PATH:/snap/bin""#).count(), 2);
     }
 
     #[test]
