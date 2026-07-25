@@ -10,18 +10,19 @@ import * as s3deploy from "aws-cdk-lib/aws-s3-deployment";
 import { Construct } from "constructs";
 
 export interface TilebenchStackProps extends cdk.StackProps {
-  /** Fully-qualified domain the dashboard is served from. */
+  /** Fully-qualified domain the site is served from (the apex). */
   domainName: string;
-  /** Parent hosted zone the subdomain records live in. */
+  /** Hosted zone the records live in. */
   zoneName: string;
   zoneId: string;
 }
 
 /**
- * The tilebench.johncarmack.com static dashboard: a private S3 bucket served
- * only through CloudFront (OAC), a DNS-validated certificate, alias records in
- * the parent zone, and a bucket deployment that publishes `apps/docs/dist` and
- * invalidates on every `cdk deploy`.
+ * The planetiler.rs site: a private S3 bucket served only through CloudFront
+ * (OAC), a DNS-validated certificate, alias records in the zone, and two
+ * bucket deployments — the splash placeholder at the root and the tilebench
+ * dashboard (`apps/docs/dist`, built with `base: "/benchmarks/"`) under
+ * `/benchmarks` — with an invalidation on every `cdk deploy`.
  */
 export class TilebenchStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: TilebenchStackProps) {
@@ -47,6 +48,27 @@ export class TilebenchStack extends cdk.Stack {
       autoDeleteObjects: true,
     });
 
+    // S3 has no directory indexes and defaultRootObject only covers "/", so
+    // "/benchmarks" and "/benchmarks/" would otherwise miss the bucket and
+    // fall through to the splash via the 403 handler below.
+    const indexRewrite = new cloudfront.Function(this, "IndexRewrite", {
+      comment: "route /benchmarks to the dashboard's index.html",
+      code: cloudfront.FunctionCode.fromInline(
+        [
+          "function handler(event) {",
+          "  var request = event.request;",
+          "  var uri = request.uri;",
+          "  if (uri === '/benchmarks' || uri === '/benchmarks/') {",
+          "    request.uri = '/benchmarks/index.html';",
+          "  } else if (uri.indexOf('/benchmarks/') === 0 && uri.split('/').pop().indexOf('.') === -1) {",
+          "    request.uri = '/benchmarks/index.html';",
+          "  }",
+          "  return request;",
+          "}",
+        ].join("\n"),
+      ),
+    });
+
     const distribution = new cloudfront.Distribution(this, "Distribution", {
       comment: `${props.domainName} static site`,
       defaultBehavior: {
@@ -54,12 +76,18 @@ export class TilebenchStack extends cdk.Stack {
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
         compress: true,
+        functionAssociations: [
+          {
+            function: indexRewrite,
+            eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+          },
+        ],
       },
       defaultRootObject: "index.html",
       domainNames: [props.domainName],
       certificate,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
-      // Single-page fallback: serve index.html for any unmatched path.
+      // Any path that misses the bucket serves the splash page.
       errorResponses: [403, 404].map((httpStatus) => ({
         httpStatus,
         responseHttpStatus: 200,
@@ -81,16 +109,29 @@ export class TilebenchStack extends cdk.Stack {
       target,
     });
 
-    // Publish the built site and invalidate on deploy. `bun run build` must
-    // have produced apps/docs/dist before `cdk deploy`.
-    new s3deploy.BucketDeployment(this, "DeploySite", {
-      sources: [s3deploy.Source.asset(path.join(__dirname, "..", "..", "..", "apps", "docs", "dist"))],
+    // The splash placeholder at the root. prune stays off so this deployment
+    // never sweeps the dashboard out from under /benchmarks.
+    new s3deploy.BucketDeployment(this, "DeploySplash", {
+      sources: [s3deploy.Source.asset(path.join(__dirname, "..", "..", "..", "apps", "splash"))],
       destinationBucket: bucket,
+      prune: false,
       distribution,
       distributionPaths: ["/*"],
     });
 
+    // The dashboard under /benchmarks. `pnpm run build` must have produced
+    // apps/docs/dist before `cdk deploy`; prune is scoped to the prefix, so
+    // stale hashed assets are cleaned without touching the splash.
+    new s3deploy.BucketDeployment(this, "DeploySite", {
+      sources: [s3deploy.Source.asset(path.join(__dirname, "..", "..", "..", "apps", "docs", "dist"))],
+      destinationBucket: bucket,
+      destinationKeyPrefix: "benchmarks/",
+      distribution,
+      distributionPaths: ["/benchmarks/*"],
+    });
+
     new cdk.CfnOutput(this, "Url", { value: `https://${props.domainName}` });
+    new cdk.CfnOutput(this, "BenchmarksUrl", { value: `https://${props.domainName}/benchmarks` });
     new cdk.CfnOutput(this, "DistributionId", { value: distribution.distributionId });
     new cdk.CfnOutput(this, "BucketName", { value: bucket.bucketName });
   }

@@ -7,7 +7,7 @@
 
 /** Where the SSE backend lives; published in config.json by the CDK stack. */
 export interface LiveConfig {
-  /** e.g. https://live.runner.johncarmack.com */
+  /** e.g. https://live.runner.planetiler.rs */
   url: string;
 }
 

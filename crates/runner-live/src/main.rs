@@ -42,7 +42,7 @@ struct Args {
     #[arg(
         long,
         env = "RUNNER_LIVE_CONFIG_URL",
-        default_value = "https://runner.johncarmack.com/config.json"
+        default_value = "https://runner.planetiler.rs/config.json"
     )]
     config_url: String,
     #[arg(long, env = "RUNNER_LIVE_USER_POOL_ID")]
@@ -56,7 +56,7 @@ struct Args {
     #[arg(
         long,
         env = "RUNNER_LIVE_ALLOWED_ORIGINS",
-        default_value = "https://runner.johncarmack.com,http://localhost:5173",
+        default_value = "https://runner.planetiler.rs,http://localhost:5173",
         value_delimiter = ','
     )]
     allowed_origins: Vec<String>,

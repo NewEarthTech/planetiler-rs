@@ -86,7 +86,7 @@ RUN_ID="$JOB-$(date -u +%Y%m%d-%H%M%S)"
 scp -q "${SSH_OPTS[@]}" "$HERE/drain.sh" "ubuntu@$IP:drain.sh"
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
   "chmod +x drain.sh && nohup env DRAIN_POLL=1 ./drain.sh '$RUN_ID' > drain.log 2>&1 < /dev/null & echo 'drain started'"
-echo "live console: https://runner.johncarmack.com (run $RUN_ID)"
+echo "live console: https://runner.planetiler.rs (run $RUN_ID)"
 
 # RUN_ID in the job's env keys the S3 results upload the runner does before
 # the box dies; it lines up with the drain's log streams.

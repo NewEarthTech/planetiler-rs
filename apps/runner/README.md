@@ -14,7 +14,7 @@ Everything is additive: a box launched without the instance profile (stack not d
 
 The next tier of the live path: `crates/runner-live` (#60) is a consumer backend that holds a CloudWatch **Live Tail** session over the run log group — a streaming call, opened only while at least one client is attached — parses lines into typed events, ring-buffers per-run history, and serves it all as **SSE** with `Last-Event-ID` resume (`GET /runs/{run-id}/events`: history first, then live, one response — the Vercel `?follow=1` shape). Auth is the same Cognito id token the SPA already holds, verified against the pool JWKS from the site's published `config.json`; the ingest transport sits behind a `LogSource` seam so a direct box→backend stream can swap in later without touching the parser, buffer, or client leg.
 
-It runs on `RunnerBackendStack` (`infra/runner/lib/backend-stack.ts`): a t4g.nano (Ubuntu 24.04 arm64 — glibc-matched to the arm CI runners that build the binary) behind Caddy, which owns TLS on `live.runner.johncarmack.com`; an EIP keeps the address stable across instance replacements. The binary ships as a CDK asset whose hash rides in user-data, so `userDataCausesReplacement` turns every new binary into a fresh instance built by one boot script. The instance role reads the run log group and its own asset, and nothing else; there is no ssh — port 22 is closed and debugging goes through SSM Session Manager (`aws ssm start-session --target <InstanceId>`). The SPA consumes the stream when `config.json` carries a `live.url` (the stack publishes it from `RUNNER_LIVE_DOMAIN`; set that variable empty to kill-switch back to CloudWatch polling), and the backend allows the console's origin by CORS — the Authorization header makes every browser call preflighted.
+It runs on `RunnerBackendStack` (`infra/runner/lib/backend-stack.ts`): a t4g.nano (Ubuntu 24.04 arm64 — glibc-matched to the arm CI runners that build the binary) behind Caddy, which owns TLS on `live.runner.planetiler.rs`; an EIP keeps the address stable across instance replacements. The binary ships as a CDK asset whose hash rides in user-data, so `userDataCausesReplacement` turns every new binary into a fresh instance built by one boot script. The instance role reads the run log group and its own asset, and nothing else; there is no ssh — port 22 is closed and debugging goes through SSM Session Manager (`aws ssm start-session --target <InstanceId>`). The SPA consumes the stream when `config.json` carries a `live.url` (the stack publishes it from `RUNNER_LIVE_DOMAIN`; set that variable empty to kill-switch back to CloudWatch polling), and the backend allows the console's origin by CORS — the Authorization header makes every browser call preflighted.
 
 ## Backend deploy
 
@@ -35,11 +35,11 @@ Out of the box sign-in uses one admin-created Cognito user (`RUNNER_OWNER_EMAIL`
 2. In IAM Identity Center → Applications → **Add customer managed application** (SAML 2.0): set **Application ACS URL** = `SamlAcsUrl`, **Application SAML audience** = `SamlSpEntityId`, add an attribute mapping `email` → `${user:email}` (Subject/NameID = email), and assign yourself. Copy the app's **IAM Identity Center SAML metadata** URL.
 3. Set the `RUNNER_SAML_METADATA_URL` repo variable in GitHub (CI deploys pass it through; for local deploys set it in `infra/runner/.env` too) and deploy again. Sign-in now goes straight to the AWS access portal and the Cognito-local user is removed.
 
-Plain `pnpm dev` runs unauthenticated — there is no `/config.json`, and the demo needs no AWS. To exercise the real sign-in flow locally, copy the deployed config (`curl https://runner.johncarmack.com/config.json`) to `public/config.json` (gitignored); `http://localhost:5173/auth/callback` is registered on the pool client for exactly this.
+Plain `pnpm dev` runs unauthenticated — there is no `/config.json`, and the demo needs no AWS. To exercise the real sign-in flow locally, copy the deployed config (`curl https://runner.planetiler.rs/config.json`) to `public/config.json` (gitignored); `http://localhost:5173/auth/callback` is registered on the pool client for exactly this.
 
 ## Deploy
 
-Live at <https://runner.johncarmack.com>. CI deploys on every push to `main` that touches the console or the shared web workspace (`.github/workflows/deploy.yml`, OIDC role from `infra/ci` — no AWS keys). Local fallback: `just runner::deploy` from anywhere in the repo (stack `RunnerConsoleStack`, mirrors the tilebench stack in `infra/docs`); `just runner::diff` previews. Local runs need default AWS creds and `infra/runner/.env` (see `.env.example` there).
+Live at <https://runner.planetiler.rs>. CI deploys on every push to `main` that touches the console or the shared web workspace (`.github/workflows/deploy.yml`, OIDC role from `infra/ci` — no AWS keys). Local fallback: `just runner::deploy` from anywhere in the repo (stack `RunnerConsoleStack`, mirrors the tilebench stack in `infra/docs`); `just runner::diff` previews. Local runs need default AWS creds and `infra/runner/.env` (see `.env.example` there).
 
 ## Roadmap
 
@@ -48,7 +48,7 @@ Live at <https://runner.johncarmack.com>. CI deploys on every push to `main` tha
 3. ~~Auth (AWS SSO)~~ (#55)
 4. ~~Live log drain into this UI~~ (#56 — CloudWatch Logs + identity-pool polling, not a websocket)
 5. ~~Runner image build/push to ECR in CI~~ (this — see Runner image below)
-6. Console-side dispatch (#59), in slices: ~~the `runner-live` SSE backend~~ (#60), ~~its stack~~ (#61, live at live.runner.johncarmack.com), ~~the SPA's switch to the SSE stream~~ (this); next the run API + ActionBar wiring
+6. Console-side dispatch (#59), in slices: ~~the `runner-live` SSE backend~~ (#60), ~~its stack~~ (#61, live at live.runner.planetiler.rs), ~~the SPA's switch to the SSE stream~~ (this); next the run API + ActionBar wiring
 7. Tighten and harden
 
 ## Runner image
