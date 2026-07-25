@@ -3,14 +3,19 @@ name: image
 # Build the planetiler-rs runner image and push it to ECR (planetiler-rs-bench).
 # On merges to main it builds arm64 natively and pushes two tags — the commit
 # sha and `main` — whenever the image's bytes would change (source, deps,
-# toolchain, or the recipe). On PRs it builds only when the recipe itself
-# changes (Dockerfile/deps/toolchain), to catch a broken build before main; a
-# source-only PR is already compiled by the x86 `test` job, so it doesn't also
-# pay for a full arm64 build here. No AWS keys: the push assumes the infra/ci
-# OIDC role, trust pinned to this repo's main.
+# toolchain, or the recipe). Pushes to perf/** and engine/** branches build
+# and push the `:sha` tag only — the candidate image an A/B dispatch compares
+# against `:main` (#59's scoping note) — never the moving `:main` tag. On PRs
+# it builds only when the recipe itself changes (Dockerfile/deps/toolchain),
+# to catch a broken build before main; a source-only PR is already compiled by
+# the x86 `test` job, so it doesn't also pay for a full arm64 build here — a
+# candidate branch's own push event covers the image. workflow_dispatch from
+# one of these branches is the escape hatch when a needed `:sha` image exists
+# for no pushed path (say, a bench-only candidate). No AWS keys: the push
+# assumes the infra/ci OIDC role, trust pinned to this repo.
 on:
   push:
-    branches: [main]
+    branches: [main, "perf/**", "engine/**"]
     paths:
       # Only the CLI crate: the Dockerfile builds --bin planetiler-rs and
       # nothing else, and that package has no path dependencies, so run-api
@@ -65,13 +70,18 @@ jobs:
 
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      # Push only from main, and only once the OIDC role is wired (mirrors
-      # deploy.yml's guard). PRs and un-wired accounts build without pushing.
+      # Push from main and the A/B candidate branches, and only once the OIDC
+      # role is wired (mirrors deploy.yml's guard). PRs and un-wired accounts
+      # build without pushing.
       - id: gate
         env:
           ROLE: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
         run: |
-          if [ "${{ github.ref }}" = "refs/heads/main" ] \
+          case "${{ github.ref }}" in
+            refs/heads/main|refs/heads/perf/*|refs/heads/engine/*) pushable=true ;;
+            *) pushable=false ;;
+          esac
+          if [ "$pushable" = "true" ] \
             && [ "${{ github.event_name }}" != "pull_request" ] \
             && [ -n "$ROLE" ]; then
             echo "push=true" >> "$GITHUB_OUTPUT"
@@ -90,6 +100,8 @@ jobs:
         uses: aws-actions/amazon-ecr-login@d539f0932e70871a027e9d5a9d8fc38589180a64 # v2.1.6
 
       # Real ECR tags when pushing; a throwaway local tag when only validating.
+      # Only main moves the `:main` tag — a candidate branch pushes its `:sha`
+      # and nothing else, so it can never change what a plain dispatch pulls.
       - id: meta
         run: |
           if [ "${{ steps.gate.outputs.push }}" = "true" ]; then
@@ -97,7 +109,9 @@ jobs:
             {
               echo "tags<<EOF"
               echo "$reg/planetiler-rs-bench:${{ github.sha }}"
-              echo "$reg/planetiler-rs-bench:main"
+              if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+                echo "$reg/planetiler-rs-bench:main"
+              fi
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           else
