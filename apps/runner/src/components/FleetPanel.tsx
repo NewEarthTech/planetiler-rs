@@ -126,9 +126,8 @@ export function FleetPanel({ fleet, selectedBoxId, onSelectBox, onWatchRun }: Fl
           onDispatch={() => void dispatch()}
           onCancel={() => selectedBox && void fleet.cancel(selectedBox.id)}
           onDestroy={() => selectedBox && void fleet.destroy(selectedBox.id)}
-        >
-          <div className="flex flex-col gap-2">
-            <div className="flex flex-wrap items-center gap-2">
+          requisitionControls={
+            <>
               {DISPATCHABLE_JOBS.map((candidate) => (
                 <Button
                   key={candidate}
@@ -140,7 +139,10 @@ export function FleetPanel({ fleet, selectedBoxId, onSelectBox, onWatchRun }: Fl
                 </Button>
               ))}
               <span className="text-xs text-ink-muted">{preset.blurb}</span>
-            </div>
+            </>
+          }
+        >
+          <div className="flex flex-col gap-2">
             <button
               type="button"
               className="w-fit text-xs text-ink-muted underline"

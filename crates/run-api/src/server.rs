@@ -227,7 +227,14 @@ async fn dispatch(
             .unwrap_or_else(|| state.config.planet_url.clone())
     });
     commands::check_url("planetUrl", &planet_url).map_err(AppError::bad_request)?;
-    let max_hours = request.max_hours.unwrap_or_else(|| job.default_max_hours());
+    // Dispatch re-arms the failsafe, so an unstated ceiling must not quietly
+    // widen: prefer the ceiling the box was requisitioned with (its tag) and
+    // only then the job default. Seen live: a box requisitioned at 6 h came
+    // back reading ≤14 h after a dispatch with an empty body.
+    let max_hours = request
+        .max_hours
+        .or_else(|| info.tag("max-hours").and_then(|h| h.parse().ok()))
+        .unwrap_or_else(|| job.default_max_hours());
     if !(1..=24).contains(&max_hours) {
         return Err(AppError::bad_request("maxHours must be 1-24"));
     }
@@ -596,6 +603,32 @@ mod tests {
                 ("run-id".to_string(), run_id.to_string()),
                 ("max-hours".to_string(), "14".to_string()),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_keeps_the_requisitioned_ceiling_when_unstated() {
+        let fake = Arc::new(FakeCloud::default());
+        let mut tags = planet_tags();
+        tags.push(("max-hours", "6"));
+        fake.seeded
+            .lock()
+            .unwrap()
+            .push(("us-west-2".into(), bench_box("i-0six", &tags)));
+        let app = router(state(fake.clone()));
+        let (status, body) = call(&app, "POST", "/boxes/i-0six/jobs", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let commands = fake.commands.lock().unwrap();
+        assert!(
+            commands[0].2.contains("shutdown -h +360"),
+            "{}",
+            commands[0].2
+        );
+        let tagged = fake.tagged.lock().unwrap();
+        assert!(
+            tagged[0]
+                .2
+                .contains(&("max-hours".to_string(), "6".to_string()))
         );
     }
 
