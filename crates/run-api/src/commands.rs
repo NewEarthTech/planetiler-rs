@@ -4,7 +4,8 @@
 //! strict allowlist, not an escape — so the generated scripts only ever
 //! contain characters that mean themselves to a shell.
 
-use chrono::{DateTime, Utc};
+use time::OffsetDateTime;
+use time::macros::format_description;
 
 /// Tags, refs, image tags, instance types: `[A-Za-z0-9._/:-]`, non-empty,
 /// bounded. Nothing a shell or an EC2 tag value would reinterpret.
@@ -45,8 +46,13 @@ pub fn check_url(what: &str, value: &str) -> Result<(), String> {
 
 /// Same shape run.sh uses, so a run is one id everywhere: the drain streams,
 /// the S3 results prefix, the console's run picker.
-pub fn new_run_id(job: &str, now: DateTime<Utc>) -> String {
-    format!("{job}-{}", now.format("%Y%m%d-%H%M%S"))
+pub fn new_run_id(job: &str, now: OffsetDateTime) -> String {
+    let stamp = now
+        .format(format_description!(
+            "[year][month][day]-[hour][minute][second]"
+        ))
+        .expect("fixed format on a valid datetime");
+    format!("{job}-{stamp}")
 }
 
 pub struct Dispatch<'a> {
@@ -162,9 +168,7 @@ mod tests {
 
     #[test]
     fn run_ids_match_the_run_sh_shape() {
-        let now = DateTime::parse_from_rfc3339("2026-07-24T10:11:12Z")
-            .unwrap()
-            .to_utc();
+        let now = time::macros::datetime!(2026-07-24 10:11:12 UTC);
         assert_eq!(new_run_id("planet", now), "planet-20260724-101112");
     }
 

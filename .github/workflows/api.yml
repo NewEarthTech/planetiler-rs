@@ -47,16 +47,20 @@ jobs:
 
       - uses: mozilla-actions/sccache-action@v0.0.10
 
-      # -j 2: with four rustc processes the 16 GB runner OOMs — aws-sdk-ec2's
-      # frontend is a multi-GB process on its own, and systemd-oomd SIGTERMs
-      # the job cgroup (both exit-143 failures, at any opt level). Two jobs
-      # keep the giant crate paired with at most one sibling; sccache makes
-      # the serialization cheap on every run after the first.
+      # -j 1: the exit-143s were systemd-oomd SIGTERMing the cgroup whenever
+      # aws-sdk-ec2 and aws-sdk-ssm — the SDK's two giant crates — compiled
+      # concurrently. Measured in a 4-core capped container: ec2's rustc
+      # alone peaks at 7.2 GiB / 4 min under this profile, which fits the
+      # 16 GB runner; two such frontends plus rlib churn do not. Serial
+      # compiles cap peak memory at the single biggest crate, and sccache
+      # makes the serialization cheap on every run after the first.
+      # (codegen-units=1 was tried and is WORSE: one merged LLVM module for
+      # ec2 exceeds 10 GiB on its own.)
       - name: Build run-api (aarch64 musl static)
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
           rustup target add aarch64-unknown-linux-musl
-          cargo build -j 2 -p run-api --profile lambda --locked --target aarch64-unknown-linux-musl
+          cargo build -j 1 -p run-api --profile lambda --locked --target aarch64-unknown-linux-musl
           mkdir -p infra/runner/dist-api
           cp target/aarch64-unknown-linux-musl/lambda/run-api infra/runner/dist-api/bootstrap
 
