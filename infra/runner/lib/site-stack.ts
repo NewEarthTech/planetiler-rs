@@ -252,6 +252,16 @@ export class RunnerConsoleStack extends cdk.Stack {
         resources: groupArns,
       }),
     );
+    // Requisition's last act is tagging the instance `ready` (the console's
+    // readiness signal — EC2 `running` says nothing about provisioning).
+    // Bench-tagged instances only, mirroring the run-api Lambda's condition.
+    boxRole.addToPolicy(
+      new iam.PolicyStatement({
+        actions: ["ec2:CreateTags"],
+        resources: [`arn:${this.partition}:ec2:*:${this.account}:instance/*`],
+        conditions: { StringEquals: { "ec2:ResourceTag/Name": BENCH_NAME_TAG } },
+      }),
+    );
     new iam.InstanceProfile(this, "BenchBoxProfile", {
       instanceProfileName: BENCH_BOX_PROFILE,
       role: boxRole,

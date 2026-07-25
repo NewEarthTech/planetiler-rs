@@ -39,7 +39,11 @@ ship_results() {
   command -v aws >/dev/null || { echo "no aws cli; results stay on the box"; return 0; }
   local dest="s3://${RESULTS_BUCKET:-planetiler-rs-run-results}/$RUN_ID"
   local S3=(aws --region "${RESULTS_REGION:-us-east-1}" s3 cp --no-progress)
-  if [ -d results ] && "${S3[@]}" --recursive results/ "$dest/results/" >/dev/null 2>&1; then
+  # An empty results/ ships nothing and creates no prefix — a cancel during
+  # the download ends here — so only claim a ship that put objects somewhere.
+  if [ -z "$(ls -A results 2>/dev/null)" ]; then
+    echo "no results to ship (results/ is empty; the run ended before the report began)"
+  elif "${S3[@]}" --recursive results/ "$dest/results/" >/dev/null 2>&1; then
     echo "results shipped: $dest/results/"
   else
     echo "results ship to $dest failed (no instance profile?)"
