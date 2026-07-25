@@ -1,6 +1,6 @@
 # tilebench
 
-The benchmark scoreboard for [planetiler-rs](https://github.com/johncarmack1984/planetiler-rs) vs Java [Planetiler](https://github.com/onthegomap/planetiler), deployed at [tilebench.johncarmack.com](https://tilebench.johncarmack.com). Three questions, charted: how long does the build take, how much memory does it hold, and what does it cost on a dedicated cloud box.
+The benchmark scoreboard for [planetiler-rs](https://github.com/NewEarthTech/planetiler-rs) vs Java [Planetiler](https://github.com/onthegomap/planetiler), deployed at [planetiler.rs/benchmarks](https://planetiler.rs/benchmarks). Three questions, charted: how long does the build take, how much memory does it hold, and what does it cost on a dedicated cloud box.
 
 ## Where the numbers come from
 
@@ -13,8 +13,8 @@ Vite + React 19 + Tailwind v4, shadcn-style components on [Base UI](https://base
 ## Develop & deploy
 
 ```sh
-bun install && bun run dev   # local
-just deploy                  # build → S3 sync → CloudFront invalidation
+pnpm install && pnpm dev     # local
+just docs::deploy            # build → S3 sync → CloudFront invalidation
 ```
 
-`infra/` is a CDK app (S3 behind CloudFront OAC, DNS-validated ACM cert, Route53 aliases in the parent zone, BucketDeployment publishing `dist/`). One-time setup: copy `infra/.env.example` to `infra/.env` and fill in the parent hosted zone id; the account comes from your AWS credentials, nothing is baked in.
+`infra/docs` is a CDK app (S3 behind CloudFront OAC, DNS-validated ACM cert, Route53 aliases in the planetiler.rs zone, BucketDeployments publishing the splash placeholder at the root and `dist/` under `/benchmarks` — the app builds with `base: "/benchmarks/"`). One-time setup: copy `infra/docs/.env.example` to `infra/docs/.env` and fill in the hosted zone id; the account comes from your AWS credentials, nothing is baked in.

@@ -19,10 +19,11 @@ cdk.Tags.of(app).add("ManagedBy", "cdk");
 new TilebenchStack(app, "TilebenchStack", {
   // CloudFront and its ACM certificate must live in us-east-1.
   env: { account, region: "us-east-1" },
-  domainName: process.env.TILEBENCH_DOMAIN ?? "tilebench.johncarmack.com",
-  zoneName: process.env.TILEBENCH_ZONE_NAME ?? "johncarmack.com",
-  // The parent hosted zone id, from infra/docs/.env (kept out of the repo).
-  zoneId: requireEnv("TILEBENCH_ZONE_ID"),
+  domainName: process.env.SITE_DOMAIN ?? "planetiler.rs",
+  zoneName: process.env.SITE_ZONE_NAME ?? "planetiler.rs",
+  // The hosted zone id (PlanetilerRsZoneStack, infra/dns), from
+  // infra/docs/.env (kept out of the repo).
+  zoneId: requireEnv("SITE_ZONE_ID"),
 });
 
 function requireEnv(name: string): string {

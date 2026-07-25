@@ -85,7 +85,7 @@ export interface RunnerConsoleStackProps extends cdk.StackProps {
 }
 
 /**
- * The runner.johncarmack.com console: a private S3 bucket served only through
+ * The runner.planetiler.rs console: a private S3 bucket served only through
  * CloudFront (OAC), a DNS-validated certificate, alias records in the parent
  * zone, and a bucket deployment that publishes `apps/runner/dist` and
  * invalidates on every `cdk deploy`. Mirrors the tilebench stack in

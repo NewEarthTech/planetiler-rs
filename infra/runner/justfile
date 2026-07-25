@@ -28,7 +28,7 @@ build-backend:
       bash -c "cargo build -p runner-live --release --locked && cp /target/release/runner-live /src/infra/runner/dist-backend-out"
     mkdir -p dist-backend && mv dist-backend-out dist-backend/runner-live
 
-# Deploy the SSE backend (#59): t4g.nano + Caddy at live.runner.johncarmack.com.
+# Deploy the SSE backend (#59): t4g.nano + Caddy at live.runner.planetiler.rs.
 # A changed binary replaces the instance (its asset hash rides in user-data).
 deploy-backend: build-backend
     pnpm install
@@ -54,7 +54,7 @@ build-api:
     mkdir -p dist-api && mv dist-api-out dist-api/bootstrap
 
 # Deploy the dispatch API (#59): Lambda + HTTP API + JWT authorizer at
-# api.runner.johncarmack.com. Needs RunnerConsoleStack deployed first (it
+# api.runner.planetiler.rs. Needs RunnerConsoleStack deployed first (it
 # publishes the pool/client SSM parameters the authorizer reads).
 deploy-api: build-api
     pnpm install

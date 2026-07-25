@@ -23,11 +23,16 @@ cdk.Tags.of(app).add("ManagedBy", "cdk");
 // it, RunnerConsoleStack advertises it in config.json. Explicitly empty
 // ("" in .env or the workflow) disables the advert — the kill switch that
 // drops the console back to CloudWatch polling on the next deploy.
-const liveDomain = process.env.RUNNER_LIVE_DOMAIN ?? "live.runner.johncarmack.com";
+const liveDomain = process.env.RUNNER_LIVE_DOMAIN ?? "live.runner.planetiler.rs";
 
 // The dispatch API's domain, same pattern: RunApiStack serves it,
 // RunnerConsoleStack advertises it. "" = no dispatch controls in the console.
-const apiDomain = process.env.RUNNER_API_DOMAIN ?? "api.runner.johncarmack.com";
+const apiDomain = process.env.RUNNER_API_DOMAIN ?? "api.runner.planetiler.rs";
+
+// The console's domain, shared by all three stacks: RunnerConsoleStack serves
+// it, the other two allow it by CORS (and the backend reads config.json from
+// it), so a console move is one value here.
+const consoleDomain = process.env.RUNNER_DOMAIN ?? "runner.planetiler.rs";
 
 // Each stack only instantiates when its build artifact exists, because
 // synthesizing this app synthesizes every stack in it: the backend workflow
@@ -39,8 +44,8 @@ if (fs.existsSync(consoleDist)) {
   new RunnerConsoleStack(app, "RunnerConsoleStack", {
     // CloudFront and its ACM certificate must live in us-east-1.
     env: { account, region: "us-east-1" },
-    domainName: process.env.RUNNER_DOMAIN ?? "runner.johncarmack.com",
-    zoneName: process.env.RUNNER_ZONE_NAME ?? "johncarmack.com",
+    domainName: consoleDomain,
+    zoneName: process.env.RUNNER_ZONE_NAME ?? "planetiler.rs",
     // The parent hosted zone id, from infra/runner/.env (kept out of the repo).
     zoneId: requireEnv("RUNNER_ZONE_ID"),
     authDomainPrefix: process.env.RUNNER_AUTH_DOMAIN_PREFIX ?? "runner-johncarmack",
@@ -63,9 +68,9 @@ if (fs.existsSync(path.join(apiDist, "bootstrap")) && apiDomain) {
   new RunApiStack(app, "RunApiStack", {
     env: { account, region: "us-east-1" },
     domainName: apiDomain,
-    zoneName: process.env.RUNNER_ZONE_NAME ?? "johncarmack.com",
+    zoneName: process.env.RUNNER_ZONE_NAME ?? "planetiler.rs",
     zoneId: requireEnv("RUNNER_ZONE_ID"),
-    consoleOrigin: `https://${process.env.RUNNER_DOMAIN ?? "runner.johncarmack.com"}`,
+    consoleOrigin: `https://${consoleDomain}`,
     liveBase: liveDomain ? `https://${liveDomain}` : "",
     distDir: apiDist,
   });
@@ -81,10 +86,10 @@ if (fs.existsSync(backendBinary) && liveDomain) {
   new RunnerBackendStack(app, "RunnerBackendStack", {
     env: { account, region: "us-east-1" },
     domainName: liveDomain,
-    zoneName: process.env.RUNNER_ZONE_NAME ?? "johncarmack.com",
+    zoneName: process.env.RUNNER_ZONE_NAME ?? "planetiler.rs",
     zoneId: requireEnv("RUNNER_ZONE_ID"),
     binaryPath: backendBinary,
-    consoleConfigUrl: `https://${process.env.RUNNER_DOMAIN ?? "runner.johncarmack.com"}/config.json`,
+    consoleOrigin: `https://${consoleDomain}`,
     acmeEmail: process.env.RUNNER_OWNER_EMAIL ?? "johncarmack@me.com",
   });
 } else {

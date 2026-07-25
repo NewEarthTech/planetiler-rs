@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>planetiler.rs</title>
+    <meta name="description" content="A Rust port of Planetiler: planet-scale OpenStreetMap vector tile generation. Under active development." />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='3' y='3' width='12' height='12' rx='2' fill='%23b7410e'/%3E%3Crect x='17' y='3' width='12' height='12' rx='2' fill='%23b7410e' opacity='.55'/%3E%3Crect x='3' y='17' width='12' height='12' rx='2' fill='%23b7410e' opacity='.55'/%3E%3Crect x='17' y='17' width='12' height='12' rx='2' fill='%23b7410e' opacity='.25'/%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #fdfcfb;
+        --grid: rgba(20, 16, 12, 0.05);
+        --ink: #1c1815;
+        --muted: #6f6760;
+        --accent: #b7410e;
+        --rule: rgba(20, 16, 12, 0.12);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #141210;
+          --grid: rgba(245, 240, 235, 0.045);
+          --ink: #ece7e2;
+          --muted: #97908a;
+          --accent: #e8683a;
+          --rule: rgba(245, 240, 235, 0.14);
+        }
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        background:
+          linear-gradient(var(--grid) 1px, transparent 1px),
+          linear-gradient(90deg, var(--grid) 1px, transparent 1px),
+          var(--bg);
+        background-size: 48px 48px, 48px 48px, auto;
+        color: var(--ink);
+        display: grid;
+        place-items: center;
+        padding: 1.5rem;
+        -webkit-font-smoothing: antialiased;
+      }
+      main {
+        max-width: 34rem;
+      }
+      h1 {
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+        font-size: clamp(1.9rem, 6vw, 2.6rem);
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
+      h1 .tld {
+        color: var(--accent);
+      }
+      .tagline {
+        margin-top: 1rem;
+        font-size: 1.05rem;
+        line-height: 1.6;
+        color: var(--muted);
+      }
+      .tagline strong {
+        color: var(--ink);
+        font-weight: 500;
+      }
+      .status {
+        margin-top: 2.25rem;
+        padding-top: 1.25rem;
+        border-top: 1px solid var(--rule);
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0.6rem 1.5rem;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+      .status .dot {
+        display: inline-block;
+        width: 0.5em;
+        height: 0.5em;
+        border-radius: 50%;
+        background: var(--accent);
+        margin-right: 0.45em;
+        position: relative;
+        top: -0.08em;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 500;
+      }
+      a:hover,
+      a:focus-visible {
+        text-decoration: underline;
+        text-underline-offset: 3px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>planetiler<span class="tld">.rs</span></h1>
+      <p class="tagline">
+        A Rust port of <strong>Planetiler</strong> — building planet-scale vector tile archives
+        from OpenStreetMap, measured against the original at every step.
+      </p>
+      <p class="status">
+        <span><span class="dot"></span>Under active development</span>
+        <a href="/benchmarks">Benchmarks &rarr;</a>
+      </p>
+    </main>
+  </body>
+</html>

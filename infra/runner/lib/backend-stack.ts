@@ -22,8 +22,12 @@ export interface RunnerBackendStackProps extends cdk.StackProps {
    * binary replaces the instance (`userDataCausesReplacement`).
    */
   binaryPath: string;
-  /** Where the console publishes config.json; the backend reads its auth wiring from there. */
-  consoleConfigUrl: string;
+  /**
+   * The console's origin: the backend reads its auth wiring from the
+   * config.json published there, and allows it (plus the Vite dev server)
+   * by CORS.
+   */
+  consoleOrigin: string;
   /** ACME account email for Caddy's certificate issuance. */
   acmeEmail: string;
 }
@@ -105,7 +109,8 @@ export class RunnerBackendStack extends cdk.Stack {
         "cat > /etc/runner-live.env <<EOF",
         `RUNNER_LIVE_LOG_GROUP_ARN=${groupArn}`,
         `RUNNER_LIVE_AWS_REGION=${this.region}`,
-        `RUNNER_LIVE_CONFIG_URL=${props.consoleConfigUrl}`,
+        `RUNNER_LIVE_CONFIG_URL=${props.consoleOrigin}/config.json`,
+        `RUNNER_LIVE_ALLOWED_ORIGINS=${props.consoleOrigin},http://localhost:5173`,
         "RUNNER_LIVE_LISTEN=127.0.0.1:8080",
         "EOF",
         "cat > /etc/systemd/system/runner-live.service <<'EOF'",

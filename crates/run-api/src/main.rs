@@ -28,7 +28,7 @@ struct Args {
     #[arg(
         long,
         env = "RUN_API_LIVE_BASE",
-        default_value = "https://live.runner.johncarmack.com"
+        default_value = "https://live.runner.planetiler.rs"
     )]
     live_base: String,
     #[arg(

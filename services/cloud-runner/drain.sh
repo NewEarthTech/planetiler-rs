@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs ON the bench instance, beside the job (started detached by run.sh or
 # redispatch.sh). Tails the run's durable files into CloudWatch Logs every few
-# seconds so the runner console (runner.johncarmack.com) can watch the run
+# seconds so the runner console (runner.planetiler.rs) can watch the run
 # live. The laptop-side pollers (run.sh, watch.sh) stay the collectors of
 # record — this is the real-time view, not the archive.
 #
