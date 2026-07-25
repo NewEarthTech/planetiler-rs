@@ -77,7 +77,7 @@ impl IntoResponse for AppError {
     }
 }
 
-const AB_NOT_DISPATCHABLE: &str = "A/B jobs need a branch-built candidate image; until image.yml builds those, dispatch them from the laptop path";
+const AB_NOT_DISPATCHABLE: &str = "A/B jobs aren't console-dispatchable yet (remote.sh has no prebuilt two-binary mode); dispatch them from the laptop path";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -219,9 +219,13 @@ async fn dispatch(
         .or_else(|| info.tag("image").map(str::to_string))
         .unwrap_or_else(|| "main".into());
     commands::check_ident("ref", &ref_label).map_err(AppError::bad_request)?;
-    let planet_url = request
-        .planet_url
-        .unwrap_or_else(|| state.config.planet_url.clone());
+    // The default input is the job's own: the pinned planet for the real
+    // run, the tiny smoke extract for the rehearsal.
+    let planet_url = request.planet_url.unwrap_or_else(|| {
+        job.default_input_url()
+            .map(str::to_string)
+            .unwrap_or_else(|| state.config.planet_url.clone())
+    });
     commands::check_url("planetUrl", &planet_url).map_err(AppError::bad_request)?;
     let max_hours = request.max_hours.unwrap_or_else(|| job.default_max_hours());
     if !(1..=24).contains(&max_hours) {
@@ -519,11 +523,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requisition_launches_a_smoke_box_small_and_short() {
+        let fake = Arc::new(FakeCloud::default());
+        let app = router(state(fake.clone()));
+        let (status, body) =
+            call(&app, "POST", "/boxes", Some(json!({"job": "planet-smoke"}))).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body["region"], "us-east-1");
+        assert_eq!(body["instanceType"], "r7gd.large");
+        assert_eq!(body["maxHours"], 1);
+        let launches = fake.launches.lock().unwrap();
+        let spec = &launches[0];
+        assert!(spec.user_data.contains("shutdown -h +60"));
+        assert!(spec.tags.contains(&("job".into(), "planet-smoke".into())));
+        assert!(spec.tags.contains(&("max-hours".into(), "1".into())));
+    }
+
+    #[tokio::test]
     async fn requisition_rejects_ab_jobs_and_hostile_input() {
         let app = router(state(Arc::new(FakeCloud::default())));
         let (status, body) = call(&app, "POST", "/boxes", Some(json!({"job": "gb-ab"}))).await;
         assert_eq!(status, StatusCode::CONFLICT);
-        assert!(body["error"].as_str().unwrap().contains("branch-built"));
+        assert!(body["error"].as_str().unwrap().contains("two-binary"));
         let (status, _) = call(&app, "POST", "/boxes", Some(json!({"job": "nonsense"}))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = call(
@@ -576,6 +597,33 @@ mod tests {
                 ("max-hours".to_string(), "14".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_on_a_smoke_box_defaults_to_the_smoke_input() {
+        let fake = Arc::new(FakeCloud::default());
+        fake.seeded.lock().unwrap().push((
+            "us-east-1".into(),
+            bench_box(
+                "i-0smoke",
+                &[
+                    ("Name", cloud::BENCH_NAME),
+                    ("job", "planet-smoke"),
+                    ("dispatch", "console"),
+                    ("image", "main"),
+                ],
+            ),
+        ));
+        let app = router(state(fake.clone()));
+        let (status, body) = call(&app, "POST", "/boxes/i-0smoke/jobs", None).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let run_id = body["runId"].as_str().unwrap();
+        assert!(run_id.starts_with("planet-smoke-"), "{run_id}");
+        let commands = fake.commands.lock().unwrap();
+        // Same remote-planet.sh path, tiny input: the rehearsal exercises
+        // exactly the legs the real run will, never the pinned planet.
+        assert!(commands[0].2.contains("monaco-latest.osm.pbf"));
+        assert!(!commands[0].2.contains("planet.example"));
     }
 
     #[tokio::test]
