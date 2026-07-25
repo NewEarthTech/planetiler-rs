@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import type { LiveRun, LiveStatus } from "@/hooks/useLiveRun";
+import { hasPrepareStage, type LiveRun, type LiveStatus } from "@/hooks/useLiveRun";
 import { EMPTY_FEED, type Feed, nextFeed } from "@/lib/feed";
 import { type LiveConfig, streamRun } from "@/lib/live";
 import { createLogParser, type LogLine } from "@/lib/log";
+import type { PrepareState } from "@/lib/phases";
 import { LIVE_WINDOW_MS, type MemSample, parseMemSample, type RunSummary } from "@/lib/runs";
 
 /**
@@ -25,6 +26,7 @@ export function useLiveRunSse(config: LiveConfig, idToken: string, run: RunSumma
 
   const [feed, setFeed] = useState<Feed>(EMPTY_FEED);
   const [status, setStatus] = useState<LiveStatus>("connecting");
+  const [prepare, setPrepare] = useState<PrepareState | null>(null);
   const [mem, setMem] = useState<MemSample | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,8 +39,15 @@ export function useLiveRunSse(config: LiveConfig, idToken: string, run: RunSumma
     let memDirty = false;
     let lastEventAt = 0;
     let connected = false;
+    let authRejected = false;
+    // Producer-side stamps of the first line per stream: the gap between the
+    // job log starting and the binary's stderr starting IS the prepare stage
+    // (deps + input download), no log grammar needed.
+    let firstJobTs = 0;
+    let firstBinaryTs = 0;
     setFeed(EMPTY_FEED);
     setStatus("connecting");
+    setPrepare(null);
     setMem(null);
     setError(null);
 
@@ -52,21 +61,41 @@ export function useLiveRunSse(config: LiveConfig, idToken: string, run: RunSumma
         memDirty = false;
         setMem(memLatest);
       }
+      if (hasPrepareStage(run.id)) {
+        const done = firstBinaryTs > 0;
+        const doneS =
+          done && firstJobTs > 0 ? Math.max(0, (firstBinaryTs - firstJobTs) / 1000) : null;
+        const active = !done && firstJobTs > 0 && !authRejected;
+        const elapsedS = active ? Math.max(0, (Date.now() - firstJobTs) / 1000) : doneS;
+        setPrepare((prev) =>
+          prev &&
+          prev.done === done &&
+          prev.active === active &&
+          prev.doneS === doneS &&
+          prev.elapsedS === elapsedS
+            ? prev
+            : { done, active, doneS, elapsedS },
+        );
+      }
       const done = current.phaseDone.merge != null;
       setStatus(
         done
           ? "done"
-          : !connected
-            ? "connecting"
-            : lastEventAt && Date.now() - lastEventAt < LIVE_WINDOW_MS
-              ? "live"
-              : "stale",
+          : authRejected
+            ? "stale"
+            : !connected
+              ? "connecting"
+              : lastEventAt && Date.now() - lastEventAt < LIVE_WINDOW_MS
+                ? "live"
+                : "stale",
       );
     };
 
     streamRun(config, run.id, idToken, abort.signal, {
       onEvent: (event) => {
         if (event.ts > lastEventAt) lastEventAt = event.ts;
+        if (event.stream === "job" && firstJobTs === 0) firstJobTs = event.ts;
+        if (event.stream === "planetiler" && firstBinaryTs === 0) firstBinaryTs = event.ts;
         if (event.stream === suffix) {
           const line = parse(event.text);
           if (line) pending.push(line);
@@ -82,6 +111,10 @@ export function useLiveRunSse(config: LiveConfig, idToken: string, run: RunSumma
         connected = next;
         if (next) setError(null);
       },
+      onAuthRejected: () => {
+        authRejected = true;
+        setError("session expired — sign in again to resume the stream");
+      },
     }).catch((err: unknown) => {
       // streamRun only returns on abort; this is a belt for the unexpected.
       if (!abort.signal.aborted) setError(err instanceof Error ? err.message : String(err));
@@ -94,5 +127,5 @@ export function useLiveRunSse(config: LiveConfig, idToken: string, run: RunSumma
     };
   }, [config, idToken, run.id, suffix]);
 
-  return { feed, status, streamName, mem, error };
+  return { feed, status, streamName, prepare, mem, error };
 }

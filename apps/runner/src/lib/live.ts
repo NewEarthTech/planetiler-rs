@@ -27,6 +27,12 @@ export interface StreamRunCallbacks {
   onEvent: (event: LiveStreamEvent) => void;
   /** Fires on every transition: true once attached, false when reconnecting. */
   onConnected: (connected: boolean) => void;
+  /**
+   * The backend refused the token (401/403). Terminal: the stream stops
+   * instead of reconnecting forever — the same token would be refused again,
+   * and only a re-auth (which restarts the stream) changes that.
+   */
+  onAuthRejected?: () => void;
 }
 
 const RECONNECT_MIN_MS = 1_000;
@@ -34,8 +40,9 @@ const RECONNECT_MAX_MS = 10_000;
 
 /**
  * Stream one run's events until the signal aborts, reconnecting with backoff
- * and resuming from the last delivered seq. Returns after abort; network
- * failures never reject, they reconnect.
+ * and resuming from the last delivered seq. Returns after abort — or after an
+ * auth rejection, the one failure retrying cannot fix; network failures never
+ * reject, they reconnect.
  */
 export async function streamRun(
   config: LiveConfig,
@@ -58,6 +65,11 @@ export async function streamRun(
         signal,
         cache: "no-store",
       });
+      if (res.status === 401 || res.status === 403) {
+        callbacks.onConnected(false);
+        callbacks.onAuthRejected?.();
+        return;
+      }
       if (!res.ok || !res.body) throw new Error(`event stream: HTTP ${res.status}`);
       callbacks.onConnected(true);
       backoffMs = RECONNECT_MIN_MS;

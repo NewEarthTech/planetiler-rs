@@ -2,6 +2,7 @@ import type { CloudWatchLogsClient } from "@aws-sdk/client-cloudwatch-logs";
 import { useEffect, useState } from "react";
 import { EMPTY_FEED, type Feed, nextFeed } from "@/lib/feed";
 import { createLogParser, type LogLine } from "@/lib/log";
+import type { PrepareState } from "@/lib/phases";
 import {
   LIVE_WINDOW_MS,
   type MemSample,
@@ -23,8 +24,15 @@ export interface LiveRun {
   status: LiveStatus;
   /** The stream feeding the log window, e.g. "planet-20260722-031500/planetiler". */
   streamName: string;
+  /** The pre-pipeline stage (deps + input download); null for non-planet runs. */
+  prepare: PrepareState | null;
   mem: MemSample | null;
   error: string | null;
+}
+
+/** Planet runs spend their first ~quarter hour downloading the input. */
+export function hasPrepareStage(runId: string): boolean {
+  return runId.startsWith("planet-");
 }
 
 /**
@@ -118,5 +126,19 @@ export function useLiveRun(
     };
   }, [client, logGroup, memStream, hasMem]);
 
-  return { feed, status, streamName, mem, error };
+  // This polling path can't cheaply time the stage (no cross-stream reads),
+  // but it can stop lying: the planetiler stream existing at all is what
+  // proves the binary started, so until then the panel shows prepare, not
+  // "pass 1 · nodes".
+  const hasBinaryStream = run.suffixes.includes("planetiler");
+  const prepare: PrepareState | null = hasPrepareStage(run.id)
+    ? {
+        done: hasBinaryStream,
+        active: !hasBinaryStream && (status === "live" || status === "connecting"),
+        doneS: null,
+        elapsedS: null,
+      }
+    : null;
+
+  return { feed, status, streamName, prepare, mem, error };
 }

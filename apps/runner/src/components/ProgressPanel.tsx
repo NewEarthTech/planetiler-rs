@@ -1,7 +1,7 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@planetiler-rs/ui/card";
 import { cn, fmtDuration } from "@planetiler-rs/ui/utils";
 import type { Counters, RunState } from "@/lib/feed";
-import { PHASES, TOTAL_S } from "@/lib/phases";
+import { PHASES, PREPARE_LABEL, type PrepareState, TOTAL_S } from "@/lib/phases";
 
 interface ProgressPanelProps {
   className?: string;
@@ -9,6 +9,13 @@ interface ProgressPanelProps {
   simElapsedS: number;
   phaseDone: Record<string, number>;
   counters: Counters;
+  /**
+   * The pre-pipeline stage (deps + input download), when the run has one.
+   * While it is active the pipeline rows hold at ○ — a downloading box has
+   * nothing in pass 1, however long the job log has been flowing. The demo
+   * replay omits it: its fixture starts at binary start.
+   */
+  prepare?: PrepareState | null;
   description?: string;
 }
 
@@ -30,9 +37,11 @@ export function ProgressPanel({
   simElapsedS,
   phaseDone,
   counters,
+  prepare = null,
   description = "planet-260713 (93.9 GB) · r7gd.8xlarge · z12 full build — demo replays the 2026-07-22 run at 120×",
 }: ProgressPanelProps) {
   const started = state === "running" || state === "done" || state === "cancelled";
+  const preparing = prepare?.active ?? false;
   return (
     <Card className={className}>
       <CardHeader>
@@ -59,10 +68,36 @@ export function ProgressPanel({
           })}
         </div>
         <div className="flex flex-col gap-1.5">
+          {prepare && (
+            <div className="flex items-center gap-2 text-sm">
+              <span
+                className={cn(
+                  "w-4 text-center",
+                  prepare.done && "text-good",
+                  prepare.active && "animate-pulse text-chart-1",
+                  !prepare.done && !prepare.active && "text-ink-muted",
+                )}
+                aria-hidden="true"
+              >
+                {prepare.done ? "✓" : prepare.active ? "●" : "○"}
+              </span>
+              <span className={prepare.done || prepare.active ? "text-ink" : "text-ink-secondary"}>
+                {PREPARE_LABEL}
+              </span>
+              <span className="tabular ml-auto text-xs text-ink-muted">
+                {prepare.elapsedS != null
+                  ? fmtDuration(prepare.elapsedS)
+                  : prepare.done
+                    ? "✓"
+                    : "—"}
+              </span>
+            </div>
+          )}
           {PHASES.map((phase, i) => {
             const startS = i === 0 ? 0 : PHASES[i - 1].endS;
             const doneS = phaseDone[phase.id];
-            const active = state === "running" && doneS == null && simElapsedS >= startS;
+            const active =
+              state === "running" && !preparing && doneS == null && simElapsedS >= startS;
             return (
               <div key={phase.id} className="flex items-center gap-2 text-sm">
                 <span
