@@ -37,8 +37,22 @@ mkdir -p /data && mount "$dev" /data && chown ubuntu:ubuntu /data
 # Console-dispatch tooling: aws via snap (same as drain.sh), docker to pull
 # the runner image. The scripts run on the HOST — the container is only the
 # delivery vehicle for bytes that version with the image sha.
+#
+# Every stage from here is load-bearing, so fail fast: the readiness marker
+# must only ever be written by a box that actually holds the job material.
+# pipefail is what makes the ECR login pipe honest — without it a failed
+# credential fetch is masked by the exit code of what it feeds. The mount
+# block above deliberately stays outside this: its disk-probe loop ends on a
+# false test in the common case, which set -e would turn into an exit.
+set -eo pipefail
 export DEBIAN_FRONTEND=noninteractive
 snap install aws-cli --classic
+# Belt and braces, not a fix for a live bug: Ubuntu 24.04 already carries
+# /snap/bin in /etc/environment, so cloud-init's PATH finds the snap. Both
+# the export and the guard are here so a future image that drops it fails
+# on this line with a legible message instead of somewhere downstream.
+export PATH="$PATH:/snap/bin"
+command -v aws >/dev/null || {{ echo "aws cli missing after snap install" >&2; exit 1; }}
 apt-get update -qq
 apt-get install -y -qq docker.io
 aws ecr get-login-password --region {repo_region} | docker login --username AWS --password-stdin {registry}
@@ -101,5 +115,39 @@ mod tests {
         // Readiness marker lands last, so dispatch can wait on it.
         let ready = script.find(".box-ready").unwrap();
         assert!(ready > script.find("docker pull").unwrap());
+    }
+
+    #[test]
+    fn the_tooling_stages_are_fail_fast_before_the_ready_marker() {
+        let script = script();
+        // Ordering alone doesn't make .box-ready conditional — without a
+        // set -e covering the stages between, a failed ECR login or image
+        // pull still falls through to the marker and dispatch then starts a
+        // job on a box with no scripts and no binary.
+        let fail_fast = script
+            .find("set -eo pipefail")
+            .expect("tooling is fail-fast");
+        for stage in [
+            "snap install aws-cli",
+            "get-login-password",
+            "docker pull",
+            "docker cp",
+        ] {
+            assert!(
+                script.find(stage).unwrap() > fail_fast,
+                "{stage} must run under set -e"
+            );
+        }
+        assert!(script.find(".box-ready").unwrap() > fail_fast);
+    }
+
+    #[test]
+    fn snap_bin_is_on_path_before_the_first_aws_call() {
+        let script = script();
+        // cloud-init's root shell is not a login shell, so the
+        // /etc/profile.d entry snap relies on never runs here.
+        let path = script.find(r#"export PATH="$PATH:/snap/bin""#).unwrap();
+        assert!(path > script.find("snap install aws-cli").unwrap());
+        assert!(path < script.find("get-login-password").unwrap());
     }
 }
