@@ -12,7 +12,12 @@ on:
   push:
     branches: [main]
     paths:
-      - "crates/**"
+      # Only the CLI crate: the Dockerfile builds --bin planetiler-rs and
+      # nothing else, and that package has no path dependencies, so run-api
+      # and runner-live cannot change a byte of the image. Watching all of
+      # crates/** bought a full native arm64 compile on every backend change
+      # for a binary that came out identical. proto/ lives inside this crate.
+      - "crates/planetiler-rs-cli/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
