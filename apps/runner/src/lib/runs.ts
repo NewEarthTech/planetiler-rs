@@ -27,6 +27,19 @@ export interface RunSummary {
   lastEventAt: number | null;
 }
 
+/**
+ * Identity-pool credentials for the signed-in operator, shared by every AWS
+ * client the console builds so they cost one GetCredentialsForIdentity between
+ * them rather than one each.
+ */
+export function makeCredentials(runs: RunsConfig, userPoolProvider: string, idToken: string) {
+  return fromCognitoIdentityPool({
+    identityPoolId: runs.identityPoolId,
+    logins: { [userPoolProvider]: idToken },
+    clientConfig: { region: runs.region },
+  });
+}
+
 export function makeRunsClient(
   runs: RunsConfig,
   userPoolProvider: string,
@@ -34,11 +47,7 @@ export function makeRunsClient(
 ): CloudWatchLogsClient {
   return new CloudWatchLogsClient({
     region: runs.region,
-    credentials: fromCognitoIdentityPool({
-      identityPoolId: runs.identityPoolId,
-      logins: { [userPoolProvider]: idToken },
-      clientConfig: { region: runs.region },
-    }),
+    credentials: makeCredentials(runs, userPoolProvider, idToken),
   });
 }
 
