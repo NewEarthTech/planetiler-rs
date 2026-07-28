@@ -140,7 +140,11 @@ async fn pump(
         }
     }
     loop {
-        match live.recv().await {
+        let event = tokio::select! {
+            event = live.recv() => event,
+            _ = tx.closed() => return,
+        };
+        match event {
             Ok(event) => {
                 // Already delivered from the buffer snapshot.
                 if event.seq <= last {
@@ -307,6 +311,29 @@ mod tests {
             .await
             .unwrap();
         assert!(other.headers().get("access-control-allow-origin").is_none());
+    }
+
+    #[tokio::test]
+    async fn pump_exits_when_client_disconnects_on_idle_run() {
+        let hub = RunHub::new(1000);
+        hub.publish("idle", StreamKind::Job, 1, "only line".into());
+        let rx = hub.watchers();
+        assert_eq!(*rx.borrow(), 0);
+
+        let sub = hub.subscribe("idle", 0);
+        assert_eq!(*rx.borrow(), 1);
+
+        let (tx, client_rx) = mpsc::channel::<Arc<LogEvent>>(CLIENT_QUEUE);
+        let pump_handle = tokio::spawn(pump(hub.clone(), "idle".into(), sub, 0, tx));
+
+        // Give the pump time to drain backfill and block on live.recv().
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(*rx.borrow(), 1);
+
+        // Simulate client disconnect: drop the receiver.
+        drop(client_rx);
+        pump_handle.await.unwrap();
+        assert_eq!(*rx.borrow(), 0);
     }
 
     #[tokio::test]
