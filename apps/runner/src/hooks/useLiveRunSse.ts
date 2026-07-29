@@ -20,7 +20,11 @@ const FLUSH_MS = 150;
  * too. Reconnects resume from the last seq; CloudWatch never enters the
  * picture here.
  */
-export function useLiveRunSse(config: LiveConfig, idToken: string, run: RunSummary): LiveRun {
+export function useLiveRunSse(
+  config: LiveConfig,
+  idToken: string | null,
+  run: RunSummary,
+): LiveRun {
   const suffix = run.suffixes.includes("planetiler") ? "planetiler" : "job";
   const streamName = `${run.id}/${suffix}`;
 

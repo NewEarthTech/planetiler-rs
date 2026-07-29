@@ -23,3 +23,6 @@ jsonwebtoken = "11"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 aws-config = "1"
 aws-sdk-cloudwatchlogs = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
+# Parsing the RFC 3339 stamp the binary's tracing lines open with, so a local
+# run's events carry producer timestamps rather than read timestamps.
+time = { version = "0.3.54", features = ["parsing"] }

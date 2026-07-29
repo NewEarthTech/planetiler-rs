@@ -47,6 +47,19 @@ GeoJSON sources work too (`--source features.geojson`). The flags you'll actuall
 - `--sort-memory-mb`: external-sort budget before spilling to disk (default 256). We measured 256 MB vs 16 GB: same wall time. Spill I/O is cheap; don't spend RAM here expecting speed.
 - `--min-size`, `--simplify`, `--buffer`: per-zoom feature filtering, Douglas-Peucker tolerance (px), tile buffer.
 
+## Runs, and watching one
+
+Benchmark runs go out through one command, whether they land on your laptop or on a bench box:
+
+```sh
+just run monaco        # or rhode-island, great-britain, europe, planet
+just ui                # watch it at http://localhost:5173
+```
+
+The job fixes the input and the render flags (`services/cloud-runner/jobs.sh`); where the command finds itself fixes everything else — a laptop writes its run under `~/.planetiler-rs/runs` and touches no AWS, a bench box mounts the instance store, drains its log to CloudWatch, and ships results to S3. Same job, same flags, so the two numbers are comparable. Locally, `--save-s3` ships the results if you want them kept; nothing leaves the machine otherwise.
+
+`just ui` is the console (`apps/runner`), and it is independent of the run: a run writes files, the console reads them, so you can attach an hour in and still see the run from its first line. Cloud runs, local runs, and the recorded planet replay all render through the same parser and progress model.
+
 ## The harness
 
 Two binaries: one makes tiles, one keeps us honest.

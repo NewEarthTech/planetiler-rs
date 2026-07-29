@@ -591,9 +591,11 @@ mod tests {
         let commands = fake.commands.lock().unwrap();
         let (region, id, script) = &commands[0];
         assert_eq!((region.as_str(), id.as_str()), ("us-west-2", "i-0abc"));
-        // ref defaults to the image tag the box pulled; the URL is the pin.
+        // ref defaults to the image tag the box pulled; the URL is the pin,
+        // handed to the box's shared entry point (the same `run-job.sh <job>`
+        // a laptop runs) rather than straight to the box-side runner.
         assert!(script.contains(&format!(
-            "RUN_ID={run_id} PTRS_BIN=/home/ubuntu/ptrs ./remote-planet.sh main https://planet.example/planet.osm.pbf"
+            "RUN_ID={run_id} PTRS_BIN=/home/ubuntu/ptrs PLANET_URL=https://planet.example/planet.osm.pbf ./run-job.sh planet main"
         )));
         assert!(script.contains(&format!("./drain.sh {run_id}")));
         let tagged = fake.tagged.lock().unwrap();

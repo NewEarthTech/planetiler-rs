@@ -4,11 +4,29 @@
 // EventSource because the Cognito id token rides the Authorization header,
 // which EventSource can't set. Deliberately dependency-free — nothing in
 // here knows about React, the feed, or AWS.
+//
+// The same backend serves a laptop's local runs (`--source local`, no auth),
+// which is why every entry point here takes a nullable token: with one, this
+// is the deployed console talking to live.runner.planetiler.rs; without one,
+// it is `just ui` talking to localhost.
 
-/** Where the SSE backend lives; published in config.json by the CDK stack. */
+/**
+ * Where the SSE backend lives: published in config.json by the CDK stack for
+ * the deployed console, or the local one `just ui` starts.
+ */
 export interface LiveConfig {
-  /** e.g. https://live.runner.planetiler.rs */
+  /** e.g. https://live.runner.planetiler.rs, or http://localhost:8080 */
   url: string;
+}
+
+/** One row of the backend's own run listing — `GET /runs`, hub::RunSummary. */
+export interface BackendRun {
+  run: string;
+  lines: number;
+  /** Producer timestamp of the newest line, epoch ms. */
+  last_ts: number;
+  /** Streams this run has produced; absent on backends predating the field. */
+  streams?: LiveStreamKind[];
 }
 
 export type LiveStreamKind = "job" | "planetiler" | "mem";
@@ -47,7 +65,7 @@ const RECONNECT_MAX_MS = 10_000;
 export async function streamRun(
   config: LiveConfig,
   runId: string,
-  idToken: string,
+  idToken: string | null,
   signal: AbortSignal,
   callbacks: StreamRunCallbacks,
 ): Promise<void> {
@@ -55,10 +73,10 @@ export async function streamRun(
   let backoffMs = RECONNECT_MIN_MS;
   while (!signal.aborted) {
     try {
-      const headers: Record<string, string> = {
-        accept: "text/event-stream",
-        authorization: `Bearer ${idToken}`,
-      };
+      const headers: Record<string, string> = { accept: "text/event-stream" };
+      // No token is the local case: the backend runs with --no-auth and a
+      // stray Authorization header would only give it something to reject.
+      if (idToken) headers.authorization = `Bearer ${idToken}`;
       if (lastSeq > 0) headers["last-event-id"] = String(lastSeq);
       const res = await fetch(`${config.url}/runs/${encodeURIComponent(runId)}/events`, {
         headers,
@@ -102,6 +120,23 @@ export async function streamRun(
     await sleep(backoffMs, signal);
     backoffMs = Math.min(backoffMs * 2, RECONNECT_MAX_MS);
   }
+}
+
+/**
+ * The runs this backend knows about. The deployed console lists runs out of
+ * CloudWatch instead (it wants runs whose logs exist but whose lines the
+ * backend never buffered); locally the backend IS the index, because it and
+ * the run directory see exactly the same set.
+ */
+export async function listBackendRuns(
+  config: LiveConfig,
+  idToken: string | null,
+): Promise<BackendRun[]> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (idToken) headers.authorization = `Bearer ${idToken}`;
+  const res = await fetch(`${config.url}/runs`, { headers, cache: "no-store" });
+  if (!res.ok) throw new Error(`run listing: HTTP ${res.status}`);
+  return (await res.json()) as BackendRun[];
 }
 
 /**

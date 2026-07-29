@@ -11,6 +11,7 @@ use runner_live::hub::RunHub;
 use runner_live::server::{AppState, router};
 use runner_live::source::LogSource;
 use runner_live::source::livetail::LiveTailSource;
+use runner_live::source::local::{LocalDirSource, default_runs_dir};
 use runner_live::source::replay::ReplaySource;
 
 /// The runner console's consumer backend (#59): ingests run logs and serves
@@ -29,6 +30,14 @@ struct Args {
     /// Region the log group lives in — us-east-1 with RunnerConsoleStack.
     #[arg(long, env = "RUNNER_LIVE_AWS_REGION", default_value = "us-east-1")]
     aws_region: String,
+    /// Directory of local run directories to tail (`--source local`):
+    /// `<runs-dir>/<run-id>/{job,planetiler,mem}.log`, as written by
+    /// services/cloud-runner/local-run.sh.
+    #[arg(long, env = "RUNNER_LIVE_RUNS_DIR")]
+    runs_dir: Option<std::path::PathBuf>,
+    /// How often `--source local` re-reads the run directory.
+    #[arg(long, default_value_t = 500)]
+    local_poll_ms: u64,
     /// Recorded log file to replay (`--source replay`).
     #[arg(long)]
     replay_file: Option<std::path::PathBuf>,
@@ -53,10 +62,12 @@ struct Args {
     auth_region: Option<String>,
     /// Browser origins allowed by CORS: the console's origin plus the Vite
     /// dev server (mirrors the localhost callback on the Cognito client).
+    /// 127.0.0.1 is a distinct origin from localhost as far as CORS is
+    /// concerned, and Vite prints both — so both are admitted.
     #[arg(
         long,
         env = "RUNNER_LIVE_ALLOWED_ORIGINS",
-        default_value = "https://runner.planetiler.rs,http://localhost:5173",
+        default_value = "https://runner.planetiler.rs,http://localhost:5173,http://127.0.0.1:5173",
         value_delimiter = ','
     )]
     allowed_origins: Vec<String>,
@@ -70,7 +81,11 @@ struct Args {
 
 #[derive(Clone, Copy, ValueEnum)]
 enum SourceKind {
+    /// CloudWatch Live Tail over the run log group — the deployed backend.
     Livetail,
+    /// Local run directories on this machine — no AWS, the `just ui` path.
+    Local,
+    /// One recorded log file, replayed into a single run.
     Replay,
 }
 
@@ -104,6 +119,16 @@ async fn main() -> anyhow::Result<()> {
                 LiveTailSource {
                     client: aws_sdk_cloudwatchlogs::Client::new(&config),
                     log_group_arn: arn,
+                },
+                hub.clone(),
+            );
+        }
+        SourceKind::Local => {
+            let root = args.runs_dir.unwrap_or_else(default_runs_dir);
+            spawn_source(
+                LocalDirSource {
+                    root,
+                    poll: Duration::from_millis(args.local_poll_ms),
                 },
                 hub.clone(),
             );

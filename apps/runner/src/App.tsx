@@ -6,6 +6,7 @@ import { type ReactNode, useMemo, useState } from "react";
 import { AuthErrorGate, SignInGate } from "@/components/AuthGate";
 import { FleetPanel } from "@/components/FleetPanel";
 import { LiveRun, LiveRunStream } from "@/components/LiveRun";
+import { LocalRunList } from "@/components/LocalRunList";
 import { LogWindow } from "@/components/LogWindow";
 import { PlanetGlobe } from "@/components/PlanetGlobe";
 import { ProgressPanel } from "@/components/ProgressPanel";
@@ -17,6 +18,7 @@ import { type AuthState, useAuth, useSessionExpired } from "@/hooks/useAuth";
 import { useDemoRun } from "@/hooks/useDemoRun";
 import { useFleet } from "@/hooks/useFleet";
 import { useLiveConsole } from "@/hooks/useLiveRuns";
+import { useLocalRuns } from "@/hooks/useLocalRuns";
 import type { BoxView } from "@/lib/runApi";
 import { isLive, type RunSummary } from "@/lib/runs";
 
@@ -34,6 +36,16 @@ function Console({ auth }: { auth: Extract<AuthState, { status: "open" | "signed
   const live = useLiveConsole(auth);
   const fleet = useFleet(auth);
   const sessionExpired = useSessionExpired(auth);
+  // Two ways to reach the same SSE backend: signed in against the deployed
+  // one, or open against the local one `just ui` starts over
+  // ~/.planetiler-rs/runs. The cloud console still indexes runs out of
+  // CloudWatch (`live`); locally the backend is the index.
+  const local = auth.status === "open" ? auth.live : null;
+  const backend = auth.live;
+  const idToken = auth.status === "signed-in" ? auth.session.idToken : null;
+  const localConsole = useLocalRuns(local, idToken);
+  const allRuns = live?.runs ?? localConsole?.runs ?? null;
+  const runsError = live?.error ?? localConsole?.error ?? null;
   // Two modes, never on screen together: watching the fleet's runs, and
   // replaying recorded ones. Each keeps its own selection, so flipping tabs
   // doesn't forget what either side was looking at.
@@ -69,25 +81,30 @@ function Console({ auth }: { auth: Extract<AuthState, { status: "open" | "signed
   const watchedRun = useMemo<RunSummary | null>(() => {
     if (!watchRunId) return null;
     return (
-      live?.runs?.find((run) => run.id === watchRunId) ?? {
+      allRuns?.find((run) => run.id === watchRunId) ?? {
         id: watchRunId,
         suffixes: [],
         firstEventAt: null,
         lastEventAt: null,
       }
     );
-  }, [live?.runs, watchRunId]);
+  }, [allRuns, watchRunId]);
 
   // Replays are the finished record; anything still emitting lives on the
   // live tab instead.
-  const replayRuns = useMemo(() => (live?.runs ?? []).filter((run) => !isLive(run)), [live?.runs]);
-  const replayRun = replayRunId
-    ? (live?.runs?.find((run) => run.id === replayRunId) ?? null)
-    : null;
+  const replayRuns = useMemo(() => (allRuns ?? []).filter((run) => !isLive(run)), [allRuns]);
+  const replayRun = replayRunId ? (allRuns?.find((run) => run.id === replayRunId) ?? null) : null;
 
   const runView = (run: RunSummary): ReactNode => {
-    if (auth.status === "signed-in" && auth.live) {
-      return <LiveRunStream config={auth.live} idToken={auth.session.idToken} run={run} />;
+    if (backend) {
+      return (
+        <LiveRunStream
+          config={backend}
+          idToken={idToken}
+          run={run}
+          origin={localConsole ? "this machine" : "box"}
+        />
+      );
     }
     if (live) return <LiveRun client={live.client} logGroup={live.logGroup} run={run} />;
     return null;
@@ -117,9 +134,9 @@ function Console({ auth }: { auth: Extract<AuthState, { status: "open" | "signed
         <div>
           <h1 className="text-xl font-semibold tracking-tight">runner</h1>
           <p className="mt-1 max-w-xl text-sm text-ink-secondary">
-            Console for planetiler-rs cloud runs: requisition a bench box, dispatch a planet run,
-            and watch the box's log live — or replay a recorded run. A/B runs still go out from the
-            laptop (services/cloud-runner).
+            {localConsole
+              ? "Console for planetiler-rs runs on this machine: start one with `just run <job>` and watch it here — same job spec, same view as a cloud run. Attach any time; the run doesn't wait for you."
+              : "Console for planetiler-rs cloud runs: requisition a bench box, dispatch a planet run, and watch the box's log live — or replay a recorded run. A/B runs still go out from the laptop (services/cloud-runner)."}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -162,15 +179,27 @@ function Console({ auth }: { auth: Extract<AuthState, { status: "open" | "signed
               onWatchRun={watchRun}
             />
           )}
+          {localConsole && (
+            <LocalRunList
+              runs={localConsole.runs}
+              error={localConsole.error}
+              selected={watchRunId}
+              onSelect={watchRun}
+            />
+          )}
           {(watchedRun && runView(watchedRun)) ??
-            (selectedBox ? <IdleBox box={selectedBox} /> : <LiveEmpty hasFleet={!!fleet} />)}
+            (selectedBox ? (
+              <IdleBox box={selectedBox} />
+            ) : (
+              <LiveEmpty hasFleet={!!fleet} local={!!localConsole} />
+            ))}
           {watchedRun && results(watchedRun.id)}
         </>
       ) : (
         <>
           <ReplayList
             runs={replayRuns}
-            error={live?.error ?? null}
+            error={runsError}
             selected={replayRunId}
             onSelect={setReplayRunId}
           />
@@ -221,13 +250,15 @@ function IdleBox({ box }: { box: BoxView }) {
   );
 }
 
-function LiveEmpty({ hasFleet }: { hasFleet: boolean }) {
+function LiveEmpty({ hasFleet, local }: { hasFleet: boolean; local: boolean }) {
   return (
     <Card>
       <CardContent className="text-sm text-ink-secondary">
-        {hasFleet
-          ? "Nothing being watched. Requisition a box and dispatch a job, or hit watch on a running one — recorded runs are under replays."
-          : "This deploy has no dispatch wiring; recorded runs are under replays."}
+        {local
+          ? "Nothing selected. Start a run with `just run monaco` (or pick one above) — finished runs are under replays."
+          : hasFleet
+            ? "Nothing being watched. Requisition a box and dispatch a job, or hit watch on a running one — recorded runs are under replays."
+            : "This deploy has no dispatch wiring; recorded runs are under replays."}
       </CardContent>
     </Card>
   );

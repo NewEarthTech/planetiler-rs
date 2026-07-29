@@ -3,7 +3,7 @@ use serde::Serialize;
 /// Which of the box's three durable files a line came from. Mirrors the
 /// drain's stream naming (`<run-id>/{job,planetiler,mem}`), so Live Tail
 /// stream names map onto it 1:1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamKind {
     Job,
