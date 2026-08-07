@@ -45,20 +45,17 @@ finalize() {
 }
 trap finalize EXIT
 
-# Job selects the input and how identity is proven. Big inputs skip the two
-# dedicated identity runs and instead compare a cheap per-tile signature of the
-# outputs the timed rounds already produced.
-case "$JOB" in
-  gb-ab)
-    URL=https://download.geofabrik.de/europe/great-britain-latest.osm.pbf
-    IDENTITY=hash
-    ;;
-  europe-ab)
-    URL=https://download.geofabrik.de/europe-latest.osm.pbf
-    IDENTITY=signature
-    ;;
-  *) echo "unknown job: $JOB" >&2; exit 1 ;;
-esac
+# Job selects the input, the flags, and how identity is proven — all of it out
+# of the shared catalogue, so this box renders exactly what `just run <job>`
+# renders on a laptop. Big inputs skip the two dedicated identity runs and
+# instead compare a cheap per-tile signature of the outputs the timed rounds
+# already produced.
+# shellcheck source=services/cloud-runner/jobs.sh
+. "$(dirname "${BASH_SOURCE[0]}")/jobs.sh"
+job_spec "$JOB"
+[ "$JOB_KIND" = ab ] || { echo "job $JOB is not an A/B job" >&2; exit 1; }
+URL=$JOB_INPUT_URL
+IDENTITY=$JOB_IDENTITY
 
 echo "== deps"
 sudo apt-get update -qq
@@ -99,7 +96,7 @@ BIN_B="$HOME/ptrs-${REF_B//\//-}"
 (cd repo && git checkout -q "$REF_A" && cargo build --release -q && cp target/release/planetiler-rs "$BIN_A")
 (cd repo && git checkout -q "$REF_B" && cargo build --release -q && cp target/release/planetiler-rs "$BIN_B")
 
-FLAGS=(--layer osm --minzoom 12 --maxzoom 12 --storage sparse --min-size 0 --simplify 0 --buffer 0 --force)
+FLAGS=("${JOB_FLAGS[@]}")
 REPORT="results/$JOB-$(date -u +%Y%m%d-%H%M%S).txt"
 
 env_block() {
@@ -111,6 +108,7 @@ env_block() {
   echo "rustc: $(rustc -V)"
   echo "input: $URL"
   echo "input bytes: $ACTUAL  sha256: $(sha256sum "$INPUT" | cut -c1-16)"
+  echo "flags: $(job_flags_line)"
   echo "refs: $REF_A=$(git -C repo rev-parse --short "$REF_A")  $REF_B=$(git -C repo rev-parse --short "$REF_B")"
 }
 

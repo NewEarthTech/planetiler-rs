@@ -43,12 +43,14 @@ case "$JOB" in
     ;;
 esac
 
-# Pinned rather than `planet-latest`: a benchmark input has to be reproducible,
-# same reason the upstream jar is pinned. Bump deliberately, and re-record.
-PLANET_URL=${PLANET_URL:-https://osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com/planet/pbf/2026/planet-260713.osm.pbf}
 NAME=planetiler-bench
 KEY_FILE=$HOME/.ssh/$NAME.pem
 HERE=$(cd "$(dirname "$0")" && pwd)
+# The pinned planet URL — and every job's input and render flags — come from
+# the shared catalogue, so a laptop `just run` and this dispatch measure the
+# same thing. A one-off still overrides with PLANET_URL in the environment.
+# shellcheck source=services/cloud-runner/jobs.sh
+. "$HERE/jobs.sh"
 REPO_ROOT=$(cd "$HERE/../.." && pwd)
 OUT_DIR="$HERE/results"
 AWS() { aws --region "$REGION" "$@"; }
@@ -156,6 +158,10 @@ scp -q "${SSH_OPTS[@]}" "$BUNDLE" "ubuntu@$IP:repo.bundle"
 RUNNER=remote.sh
 [ "$JOB" = planet ] && RUNNER=remote-planet.sh
 scp -q "${SSH_OPTS[@]}" "$HERE/$RUNNER" "ubuntu@$IP:$RUNNER"
+# The entry point and the job catalogue travel with it: the box runs the same
+# `run-job.sh <job>` a laptop does, and reads the input URL and render flags
+# out of the same file, so the two are comparable 1:1.
+scp -q "${SSH_OPTS[@]}" "$HERE/run-job.sh" "$HERE/jobs.sh" "ubuntu@$IP:"
 # The planet runner shells out to tiles-delta.sh once both archives exist, to
 # distill and ship home the tile-set delta before the box (and its archives)
 # die. Travels from the working tree like the runner, not via the bundle.
@@ -181,7 +187,7 @@ fi
 if [ "$JOB" = planet ]; then
   echo "== start job: planet $REF_A"
   ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-    "chmod +x $RUNNER && nohup env RUN_ID='$RUN_ID' ./$RUNNER '$REF_A' '$PLANET_URL' > job.log 2>&1 < /dev/null & echo dispatched"
+    "chmod +x $RUNNER run-job.sh jobs.sh && nohup env RUN_ID='$RUN_ID' PLANET_URL='$PLANET_URL' ./run-job.sh '$JOB' '$REF_A' > job.log 2>&1 < /dev/null & echo dispatched"
   # Drop the cleanup trap outright rather than flipping FETCHED: the box has to
   # outlive this script, and neither branch of cleanup is what we want here.
   trap - EXIT
@@ -204,7 +210,7 @@ fi
 
 echo "== start job: $JOB $REF_A $REF_B ($ROUNDS rounds)"
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-  "chmod +x remote.sh && nohup env RUN_ID='$RUN_ID' ./remote.sh '$JOB' '$REF_A' '$REF_B' '$ROUNDS' > job.log 2>&1 < /dev/null & echo dispatched"
+  "chmod +x remote.sh run-job.sh jobs.sh && nohup env RUN_ID='$RUN_ID' ./run-job.sh '$JOB' '$REF_A' '$REF_B' '$ROUNDS' > job.log 2>&1 < /dev/null & echo dispatched"
 
 echo "== poll (status + log tail)"
 LAST_LINES=0

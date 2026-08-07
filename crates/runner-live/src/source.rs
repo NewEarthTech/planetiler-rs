@@ -1,4 +1,5 @@
 pub mod livetail;
+pub mod local;
 pub mod replay;
 
 use std::sync::Arc;

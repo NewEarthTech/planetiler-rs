@@ -10,16 +10,27 @@
 # same box and input. planetiler-rs goes first and Planetiler runs only if it
 # survives — a failed run should not also buy several hours of JVM time.
 #
-# Settings come from bench/results/planet-preflight.md and are not optional:
-# --storage sparse (the `ram` default wants ~152 GB of heap at planet scale),
-# --sort-memory-mb 1024 (the default spills ~1200 chunks and the merge opens
-# every one of them at once), a raised fd ceiling for the same reason, and
-# TMPDIR on the instance store (~350 GB of scratch, versus a 30 GB root disk).
+# The render flags come from the shared job catalogue (jobs.sh) so a laptop
+# `just run planet` measures the same thing this does; the reasoning behind
+# them is bench/results/planet-preflight.md and they are not optional:
+# --storage sparse (the `ram` default wants ~152 GB of heap at planet scale)
+# and --sort-memory-mb 1024 (the default spills ~1200 chunks and the merge
+# opens every one of them at once). The box-only settings stay here: a raised
+# fd ceiling for the same reason, and TMPDIR on the instance store (~350 GB of
+# scratch, versus a 30 GB root disk).
 set -euo pipefail
 
 REF=${1:?ref to benchmark}
 PLANET_URL=${2:?planet pbf url}
 PLANETILER_VERSION=${3:-v0.10.2}
+
+# The dispatched URL is the pin (run-api holds it server-side), so it goes in
+# before the catalogue reads PLANET_URL; the flags come back out of it, the
+# same ones `just run planet` renders with on a laptop.
+export PLANET_URL
+# shellcheck source=services/cloud-runner/jobs.sh
+. "$(dirname "${BASH_SOURCE[0]}")/jobs.sh"
+job_spec planet
 
 cd "$HOME"
 echo RUNNING > status
@@ -167,6 +178,7 @@ say "java: $(java -version 2>&1 | head -1)"
 say "ref: $REF  upstream: $PLANETILER_VERSION"
 say "input: $PLANET_URL"
 say "input bytes: $ACTUAL"
+say "flags: $(job_flags_line)"
 say "scratch: $(df -h /data | awk 'NR==2{print $2" total, "$4" free"}')"
 say "memory: $(free -g | awk '/^Mem:/{print $2" GB"}')"
 say ""
@@ -241,9 +253,7 @@ RS_START=$(date +%s)
 # only stderr, which is why the run produced tiles but an empty log.
 "$BIN" generate \
   --source "$INPUT" --output /data/out/rs.mbtiles \
-  --layer osm --minzoom 12 --maxzoom 12 \
-  --storage sparse --sort-memory-mb 1024 \
-  --min-size 0 --simplify 0 --buffer 0 --force > "$RS_STDERR" 2>&1 &
+  "${JOB_FLAGS[@]}" > "$RS_STDERR" 2>&1 &
 RS_PID=$!
 sample_and_guard "$RS_PID" &
 MON_PID=$!

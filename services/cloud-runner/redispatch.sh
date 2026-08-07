@@ -23,10 +23,13 @@ case "$JOB" in
     REGION=${AWS_REGION:-us-east-1}
     ;;
 esac
-PLANET_URL=${PLANET_URL:-https://osm-planet-us-west-2.s3.dualstack.us-west-2.amazonaws.com/planet/pbf/2026/planet-260713.osm.pbf}
 NAME=planetiler-bench
 KEY_FILE=$HOME/.ssh/$NAME.pem
 HERE=$(cd "$(dirname "$0")" && pwd)
+# Job inputs, render flags, and the pinned planet URL: one catalogue, shared
+# with the box and with a laptop's `just run`.
+# shellcheck source=services/cloud-runner/jobs.sh
+. "$HERE/jobs.sh"
 REPO_ROOT=$(cd "$HERE/../.." && pwd)
 OUT_DIR="$HERE/results"
 AWS() { aws --region "$REGION" "$@"; }
@@ -63,7 +66,7 @@ echo "== reset previous job + failsafe clock"
 # old run first, so nothing holds these open (clearing them mid-run would
 # orphan a live writer's inode instead).
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-  'pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; pkill -f "\./drain\.sh" 2>/dev/null; sleep 2; rm -rf status job.log repo planet-mem.log planet-rs.stderr drain.log results; sudo shutdown -c 2>/dev/null; true'
+  'pkill -f "\./run-job\.sh" 2>/dev/null; pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; pkill -f "\./drain\.sh" 2>/dev/null; sleep 2; rm -rf status job.log repo planet-mem.log planet-rs.stderr drain.log results; sudo shutdown -c 2>/dev/null; true'
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" "sudo shutdown -h +$((MAX_HOURS * 60)) >/dev/null 2>&1"
 
 echo "== ship repo bundle + runner"
@@ -77,6 +80,8 @@ scp -q "${SSH_OPTS[@]}" "$BUNDLE" "ubuntu@$IP:repo.bundle"
 RUNNER=remote.sh
 [ "$JOB" = planet ] && RUNNER=remote-planet.sh
 scp -q "${SSH_OPTS[@]}" "$HERE/$RUNNER" "ubuntu@$IP:$RUNNER"
+# Entry point + job catalogue, same as run.sh ships.
+scp -q "${SSH_OPTS[@]}" "$HERE/run-job.sh" "$HERE/jobs.sh" "ubuntu@$IP:"
 rm -f "$BUNDLE"
 
 # Fresh live-console drain for the fresh run. Started unconditionally: without
@@ -93,7 +98,7 @@ echo "live console: https://runner.planetiler.rs (run $RUN_ID)"
 if [ "$JOB" = planet ]; then
   echo "== start job: planet $REF_A"
   ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-    "chmod +x $RUNNER && nohup env RUN_ID='$RUN_ID' ./$RUNNER '$REF_A' '$PLANET_URL' > job.log 2>&1 < /dev/null & echo dispatched"
+    "chmod +x $RUNNER run-job.sh jobs.sh && nohup env RUN_ID='$RUN_ID' PLANET_URL='$PLANET_URL' ./run-job.sh '$JOB' '$REF_A' > job.log 2>&1 < /dev/null & echo dispatched"
   echo "== detached; collect with: $HERE/watch.sh $IP $MAX_HOURS"
   trap - EXIT
   exit 0
@@ -101,7 +106,7 @@ fi
 
 echo "== start job: $JOB $REF_A $REF_B ($ROUNDS rounds)"
 ssh "${SSH_OPTS[@]}" "ubuntu@$IP" \
-  "chmod +x remote.sh && nohup env RUN_ID='$RUN_ID' ./remote.sh '$JOB' '$REF_A' '$REF_B' '$ROUNDS' > job.log 2>&1 < /dev/null & echo dispatched"
+  "chmod +x remote.sh run-job.sh jobs.sh && nohup env RUN_ID='$RUN_ID' ./run-job.sh '$JOB' '$REF_A' '$REF_B' '$ROUNDS' > job.log 2>&1 < /dev/null & echo dispatched"
 
 echo "== poll (status + log tail)"
 LAST_LINES=0

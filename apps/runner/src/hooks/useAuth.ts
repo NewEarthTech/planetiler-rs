@@ -18,8 +18,12 @@ import type { RunApiConfig } from "@/lib/runApi";
 export type AuthState =
   /** Resolving config / finishing the callback exchange. */
   | { status: "loading" }
-  /** No auth wiring (plain `pnpm dev` without a local config.json). */
-  | { status: "open" }
+  /**
+   * No auth wiring: plain `pnpm dev` without a local config.json — the local
+   * console. `live` points at the run backend `just ui` starts (override with
+   * VITE_RUNNER_LIVE_URL, or set it empty for the demo replay alone).
+   */
+  | { status: "open"; live: LiveConfig | null }
   | { status: "signed-out"; signIn: () => void }
   | {
       status: "signed-in";
@@ -56,7 +60,7 @@ export function useAuth(): AuthState {
       if (!config) {
         apply(
           import.meta.env.DEV
-            ? { status: "open" }
+            ? { status: "open", live: localLiveConfig() }
             : { status: "error", message: "Auth configuration is missing from this deploy." },
         );
         return;
@@ -84,6 +88,16 @@ export function useAuth(): AuthState {
   }, []);
 
   return state;
+}
+
+/**
+ * The local run backend, for a dev server with no deployed config: whatever
+ * VITE_RUNNER_LIVE_URL says, or the port `just ui-server` listens on. Set the
+ * variable empty to run the console with no backend at all.
+ */
+function localLiveConfig(): LiveConfig | null {
+  const url = (import.meta.env.VITE_RUNNER_LIVE_URL ?? "http://localhost:8080").trim();
+  return url ? { url } : null;
 }
 
 /** How often to re-check a session that was only validated at boot. */

@@ -42,17 +42,44 @@ export function LiveRun({ client, logGroup, run }: LiveRunProps) {
 
 interface LiveRunStreamProps {
   config: LiveConfig;
-  idToken: string;
+  /** Null against a local backend, which runs unauthenticated. */
+  idToken: string | null;
   run: RunSummary;
+  /** Where the run is happening — the one thing the two paths don't share. */
+  origin?: RunOrigin;
 }
 
-/** A cloud run, streamed line-by-line over SSE from the runner-live backend. */
-export function LiveRunStream({ config, idToken, run }: LiveRunStreamProps) {
+type RunOrigin = "box" | "this machine";
+
+/**
+ * A run streamed line-by-line over SSE from a runner-live backend — the
+ * deployed one for a cloud run, the local one for a run on this machine. The
+ * view below cannot tell them apart, and shouldn't: same three streams, same
+ * parser, same progress model.
+ */
+export function LiveRunStream({ config, idToken, run, origin = "box" }: LiveRunStreamProps) {
   const live = useLiveRunSse(config, idToken, run);
-  return <LiveRunView run={run} live={live} />;
+  return <LiveRunView run={run} live={live} origin={origin} />;
 }
 
-function LiveRunView({ run, live }: { run: RunSummary; live: LiveRunData }) {
+/**
+ * Memory as the run's own scale reads it: a planet run is tens of GB and a
+ * laptop run is hundreds of MB, and "0.3 GB" throws away the digits that
+ * matter on the small end.
+ */
+function memText(gb: number): string {
+  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(gb * 1024)} MB`;
+}
+
+function LiveRunView({
+  run,
+  live,
+  origin = "box",
+}: {
+  run: RunSummary;
+  live: LiveRunData;
+  origin?: RunOrigin;
+}) {
   const chip = STATUS_CHIP[live.status];
   return (
     <>
@@ -67,7 +94,7 @@ function LiveRunView({ run, live }: { run: RunSummary; live: LiveRunData }) {
         </Badge>
         {live.mem && (
           <span className="tabular text-xs text-ink-muted">
-            RSS {live.mem.vmrssGb.toFixed(1)} GB · anon {live.mem.anonGb.toFixed(1)} GB · load{" "}
+            RSS {memText(live.mem.vmrssGb)} · anon {memText(live.mem.anonGb)} · load{" "}
             {live.mem.load1.toFixed(1)}
           </span>
         )}
@@ -82,7 +109,7 @@ function LiveRunView({ run, live }: { run: RunSummary; live: LiveRunData }) {
           phaseDone={live.feed.phaseDone}
           counters={live.feed.counters}
           prepare={live.prepare}
-          description="live from the box's log drain — phase widths referenced to the 2026-07-22 planet run"
+          description={`live from ${origin === "box" ? "the box's log drain" : "this machine's run directory"} — phase widths referenced to the 2026-07-22 planet run`}
         />
         <PlanetGlobe />
       </main>
@@ -91,7 +118,7 @@ function LiveRunView({ run, live }: { run: RunSummary; live: LiveRunData }) {
         lines={live.feed.lines}
         className="mt-4"
         title={live.streamName}
-        emptyText="Waiting for the first log events from the box…"
+        emptyText="Waiting for the first log events…"
       />
     </>
   );

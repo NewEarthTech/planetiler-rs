@@ -65,7 +65,11 @@ pub struct Dispatch<'a> {
     pub drain_region: &'a str,
 }
 
-/// Start a planet run: wait out requisition, clear any previous job the way
+/// Start a planet run through the box's shared entry point (`run-job.sh`, the
+/// same command `just run planet` reaches on a laptop — it sees IMDS answer
+/// and hands off to remote-planet.sh). The pinned input URL still travels
+/// from here, so the reproducibility pin stays server-side rather than
+/// riding the image. Wait out requisition, clear any previous job the way
 /// redispatch.sh does, re-arm the failsafe, then start the drain and the job
 /// as systemd transient units. NOT nohup: the SSM agent tracks every process
 /// the invocation spawns and SIGKILLs whatever is left at executionTimeout —
@@ -89,13 +93,13 @@ for _ in $(seq 1 180); do [ -f /home/ubuntu/.box-ready ] && break; sleep 5; done
 # results/ is cleared: the previous run shipped its own results at its EXIT,
 # and anything left here would ship again under THIS run's S3 prefix (seen
 # live on the first smoke redispatch).
-pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; pkill -f "\./drain\.sh" 2>/dev/null
+pkill -f "\./run-job\.sh" 2>/dev/null; pkill -f "\./remote\.sh" 2>/dev/null; pkill -f "\./remote-planet\.sh" 2>/dev/null; pkill -f "\./drain\.sh" 2>/dev/null
 sleep 2
 rm -rf /home/ubuntu/status /home/ubuntu/job.log /home/ubuntu/repo /home/ubuntu/planet-mem.log /home/ubuntu/planet-rs.stderr /home/ubuntu/drain.log /home/ubuntu/results
 shutdown -c 2>/dev/null || true
 shutdown -h +{minutes}
 systemd-run --collect --unit "ptrs-drain-{run_id}" --uid ubuntu --gid ubuntu --working-directory /home/ubuntu -- bash -c 'exec env PATH="$PATH:/snap/bin" DRAIN_GROUP={drain_group} DRAIN_REGION={drain_region} DRAIN_POLL=1 ./drain.sh {run_id} > drain.log 2>&1'
-systemd-run --collect --unit "ptrs-job-{run_id}" --uid ubuntu --gid ubuntu --working-directory /home/ubuntu -- bash -c 'exec env PATH="$PATH:/snap/bin" RUN_ID={run_id} PTRS_BIN=/home/ubuntu/ptrs ./remote-planet.sh {ref_label} {planet_url} > job.log 2>&1'
+systemd-run --collect --unit "ptrs-job-{run_id}" --uid ubuntu --gid ubuntu --working-directory /home/ubuntu -- bash -c 'exec env PATH="$PATH:/snap/bin" RUN_ID={run_id} PTRS_BIN=/home/ubuntu/ptrs PLANET_URL={planet_url} ./run-job.sh planet {ref_label} > job.log 2>&1'
 echo "dispatched {run_id}"
 "#,
         minutes = dispatch.max_hours * 60,
@@ -120,6 +124,7 @@ pkill -f "planetiler-.*\.jar" 2>/dev/null
 sleep 3
 pkill -f "\./remote-planet\.sh" 2>/dev/null
 pkill -f "\./remote\.sh" 2>/dev/null
+pkill -f "\./run-job\.sh" 2>/dev/null
 # drain.sh exits on its own once status reads DONE/FAIL and it is caught up.
 echo cancelled
 "#
@@ -200,11 +205,14 @@ mod tests {
         assert!(script.contains(
             "DRAIN_GROUP=/planetiler-rs/runs DRAIN_REGION=us-east-1 DRAIN_POLL=1 ./drain.sh planet-20260724-101112"
         ));
+        // One entry point for both sides of the fence: the box runs the same
+        // `run-job.sh <job> <ref>` a laptop does, with the pinned URL passed
+        // in so the catalogue resolves to exactly this input.
         assert!(script.contains(
-            "RUN_ID=planet-20260724-101112 PTRS_BIN=/home/ubuntu/ptrs ./remote-planet.sh 5bb72be https://example.com/planet.osm.pbf"
+            "RUN_ID=planet-20260724-101112 PTRS_BIN=/home/ubuntu/ptrs PLANET_URL=https://example.com/planet.osm.pbf ./run-job.sh planet 5bb72be"
         ));
         // Drain first, so job.log ships from its first line; both detached.
-        assert!(script.find("drain.sh").unwrap() < script.find("remote-planet.sh").unwrap());
+        assert!(script.find("drain.sh").unwrap() < script.find("run-job.sh").unwrap());
         // systemd units, never nohup: the SSM agent SIGKILLs everything left
         // in the invocation's tree at executionTimeout (3600 s default) —
         // this exact script's processes died to the second on the first
@@ -223,6 +231,7 @@ mod tests {
     fn cancel_kills_the_binary_before_the_script() {
         let script = cancel_script();
         assert!(script.find("/home/ubuntu/ptrs").unwrap() < script.find("remote-planet").unwrap());
+        assert!(script.find("/home/ubuntu/ptrs").unwrap() < script.find("run-job").unwrap());
         assert!(script.contains("planetiler-.*\\.jar"));
     }
 }

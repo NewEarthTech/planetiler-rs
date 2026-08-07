@@ -1,10 +1,41 @@
 # runner
 
-Console for planetiler-rs cloud runs (`services/cloud-runner`): requisition a bench box, dispatch a planet run onto it, watch the box's log live, and collect what it ships home — or replay the recorded planet run. A/B dispatch still happens from the laptop.
+Console for planetiler-rs runs, wherever they happen: requisition a bench box, dispatch a planet run onto it, watch the box's log live, and collect what it ships home — or watch a run on your own laptop, or replay the recorded planet run. A/B dispatch still happens from the laptop.
 
-Two sources, one UI: the **demo replay** streams the first full planet build (`bench/results/planet-run-20260722`, 2026-07-22, r7gd.8xlarge, 2 h 55 m) from a checked-in fixture at 120×; **live runs** tail the box's actual log out of CloudWatch Logs through the same parser, progress model, and log window.
+Three sources, one UI: the **demo replay** streams the first full planet build (`bench/results/planet-run-20260722`, 2026-07-22, r7gd.8xlarge, 2 h 55 m) from a checked-in fixture at 120×; **cloud runs** tail the box's actual log out of CloudWatch Logs; **local runs** tail the run directory on this machine — all three through the same parser, progress model, and log window.
 
-## Live runs
+## Local runs
+
+A run on your laptop is watched here too, with no AWS in the picture at all:
+
+```sh
+just run monaco     # or rhode-island, great-britain, europe, planet
+just ui             # backend + this dev server; open http://localhost:5173
+```
+
+`just run <job>` is the same command a bench box runs (`services/cloud-runner/run-job.sh` picks local or cloud from where it finds itself), and both sides read the input URL and the render flags out of the same `services/cloud-runner/jobs.sh` — so the local number and the cloud number are measured on the same job, not on two drifting copies of one.
+
+What makes it watchable is that `local-run.sh` writes the same three durable files the box does, one directory per run:
+
+```
+~/.planetiler-rs/runs/<run-id>/
+  job.log         the run script's narration       -> stream <run-id>/job
+  planetiler.log  the CLI's stdout+stderr          -> stream <run-id>/planetiler
+  mem.log         RSS/anon/load, the box's columns -> stream <run-id>/mem
+  status          RUNNING | DONE | FAIL
+  results/        the run report      out/  the archive
+```
+
+`runner-live --source local` tails that directory the way it consumes Live Tail in the cloud (`crates/runner-live/src/source/local.rs`), so everything downstream is unchanged. **The console and the run are independent**: the files are the transport, not a socket. Start the console an hour into a planet run and it reads every file from byte zero — the run shows up whole and then keeps streaming; stop the console mid-run and nothing happens to the run. Runs that appear while it's watching show up in the picker within a poll.
+
+Two knobs worth knowing:
+
+- **S3 is opt-in locally.** `just run monaco --save-s3` ships `results/` and the three logs to `s3://planetiler-rs-run-results/<run-id>/` — the same prefix layout a cloud run uses, so the console's results panel and `bench/results/` conventions still apply. Without the flag nothing leaves the machine and no credentials are touched. (A cloud run always ships; there, it's the only way home.)
+- **The scale knobs are yours.** `PTRS_INPUT` reuses an extract you already have, `PTRS_TMPDIR` puts the external sort's scratch on the fast disk, `PTRS_MEM_CEILING_GB` arms a watchdog (unarmed by default — the box's ceilings are sized for a 256 GB machine). `local-run.sh`'s header lists the rest.
+
+Ports: the backend listens on 8080 and the dev server on 5173. `just ui-server` and `just ui-web` run them separately if you'd rather have two terminals; `VITE_RUNNER_LIVE_URL` points the console at a backend somewhere else.
+
+## Live runs (cloud)
 
 Write side: `run.sh` attaches the `planetiler-rs-bench-box` instance profile (created by this stack) when it exists, and starts `drain.sh` on the box beside the job — it tails `job.log`, `planet-rs.stderr`, and `planet-mem.log` into streams `<run-id>/{job,planetiler,mem}` of the `/planetiler-rs/runs` log group every ~1 s. Read side: when `config.json` advertises the SSE backend (see Live backend below), the signed-in SPA holds one streaming response per run — `src/lib/live.ts`, fetch + `ReadableStream` with the id token in `Authorization` — and lines land as they're ingested, the mem readout riding the same stream; without the advert it falls back to the original identity-pool path, polling `GetLogEvents` every 3 s. The run picker lists what the log group knows (still the identity-pool read); a planet run shows live phase progress, counters, and the mem-sampler's RSS/anon/load readout.
 
@@ -36,7 +67,8 @@ First deploy is deliberately by hand (it creates the EIP and DNS record): `just 
 
 ## Dev
 
-- `pnpm install && pnpm dev` here, or `pnpm dev:runner` from the workspace root
+- `just ui` from anywhere in the repo — the local backend plus this dev server, pointed at each other
+- `pnpm install && pnpm dev` here (or `pnpm dev:runner` from the workspace root) for the console alone; with no backend up, the run list says so and the demo replay still works
 - `pnpm build` / `pnpm typecheck`; lint and format come from the workspace root (`pnpm check`)
 
 ## Auth
@@ -49,7 +81,7 @@ Out of the box sign-in uses one admin-created Cognito user (`RUNNER_OWNER_EMAIL`
 2. In IAM Identity Center → Applications → **Add customer managed application** (SAML 2.0): set **Application ACS URL** = `SamlAcsUrl`, **Application SAML audience** = `SamlSpEntityId`, add an attribute mapping `email` → `${user:email}` (Subject/NameID = email), and assign yourself. Copy the app's **IAM Identity Center SAML metadata** URL.
 3. Set the `RUNNER_SAML_METADATA_URL` repo variable in GitHub (CI deploys pass it through; for local deploys set it in `infra/runner/.env` too) and deploy again. Sign-in now goes straight to the AWS access portal and the Cognito-local user is removed.
 
-Plain `pnpm dev` runs unauthenticated — there is no `/config.json`, and the demo needs no AWS. To exercise the real sign-in flow locally, copy the deployed config (`curl https://runner.planetiler.rs/config.json`) to `public/config.json` (gitignored); `http://localhost:5173/auth/callback` is registered on the pool client for exactly this.
+Plain `pnpm dev` runs unauthenticated — there is no `/config.json`, and neither the demo nor the local run backend needs AWS. To exercise the real sign-in flow locally, copy the deployed config (`curl https://runner.planetiler.rs/config.json`) to `public/config.json` (gitignored); `http://localhost:5173/auth/callback` is registered on the pool client for exactly this.
 
 ## Deploy
 
@@ -63,7 +95,8 @@ Live at <https://runner.planetiler.rs>. CI deploys on every push to `main` that 
 4. ~~Live log drain into this UI~~ (#56 — CloudWatch Logs + identity-pool polling, not a websocket)
 5. ~~Runner image build/push to ECR in CI~~ (this — see Runner image below)
 6. Console-side dispatch (#59), in slices: ~~the `runner-live` SSE backend~~ (#60), ~~its stack~~ (#61, live at live.runner.planetiler.rs), ~~the SPA's switch to the SSE stream~~ (#63), ~~job scripts baked into the image + results to S3~~ (#66), ~~the run API~~ (#67) and ~~its stack~~ (#68, live at api.runner.planetiler.rs), ~~the ActionBar wired to it~~ (this — see Dispatch above); next `image.yml` branch builds, then the console-dispatched proof run
-7. Tighten and harden
+7. ~~Local runs in the same console~~ (this — see Local runs above: one `just run <job>` for both sides, a `local` LogSource, S3 opt-in on a laptop)
+8. Tighten and harden
 
 ## Runner image
 

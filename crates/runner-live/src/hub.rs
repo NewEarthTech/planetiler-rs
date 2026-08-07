@@ -26,6 +26,10 @@ struct RunChannel {
     next_seq: u64,
     buffer: VecDeque<Arc<LogEvent>>,
     tx: broadcast::Sender<Arc<LogEvent>>,
+    /// Which streams this run has ever produced, in first-seen order. The
+    /// ring buffer can't answer this — it forgets — and the console needs it
+    /// to pick the stream its log window follows.
+    streams: Vec<StreamKind>,
 }
 
 impl RunChannel {
@@ -34,6 +38,7 @@ impl RunChannel {
             next_seq: 1,
             buffer: VecDeque::new(),
             tx: broadcast::channel(BROADCAST_CAPACITY).0,
+            streams: Vec::new(),
         }
     }
 }
@@ -45,6 +50,8 @@ pub struct RunSummary {
     pub lines: u64,
     /// Producer timestamp of the newest line, epoch ms.
     pub last_ts: i64,
+    /// The streams seen for this run, in first-seen order.
+    pub streams: Vec<StreamKind>,
 }
 
 /// RAII attachment: holds the hub's watcher count up while an SSE client is
@@ -81,6 +88,9 @@ impl RunHub {
     pub fn publish(&self, run: &str, stream: StreamKind, ts: i64, text: String) {
         let mut inner = self.inner.lock().expect("hub lock");
         let channel = inner.entry(run.to_string()).or_insert_with(RunChannel::new);
+        if !channel.streams.contains(&stream) {
+            channel.streams.push(stream);
+        }
         let event = Arc::new(LogEvent {
             run: run.to_string(),
             seq: channel.next_seq,
@@ -140,6 +150,7 @@ impl RunHub {
                 run: run.clone(),
                 lines: c.next_seq - 1,
                 last_ts: c.buffer.back().map(|e| e.ts).unwrap_or(0),
+                streams: c.streams.clone(),
             })
             .collect();
         runs.sort_by_key(|r| std::cmp::Reverse(r.last_ts));

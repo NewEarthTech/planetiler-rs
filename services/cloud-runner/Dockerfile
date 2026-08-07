@@ -44,7 +44,13 @@ COPY --from=build /usr/local/bin/planetiler-rs /usr/local/bin/planetiler-rs
 #   c=$(docker create <image>) && docker cp "$c:/opt/cloud-runner/." "$HOME" && docker rm "$c"
 # The laptop-side dispatchers (run.sh, watch.sh, redispatch.sh) stay out — they
 # never run on a box.
-COPY services/cloud-runner/remote.sh \
+# run-job.sh + jobs.sh ride along as the box's entry point and job catalogue:
+# dispatch calls `./run-job.sh <job> <ref>`, the same command a laptop reaches
+# through `just run`, and it picks the box-side runner from where it finds
+# itself. local-run.sh deliberately stays out — a box never takes that branch.
+COPY services/cloud-runner/run-job.sh \
+     services/cloud-runner/jobs.sh \
+     services/cloud-runner/remote.sh \
      services/cloud-runner/remote-planet.sh \
      services/cloud-runner/tiles-delta.sh \
      services/cloud-runner/drain.sh /opt/cloud-runner/

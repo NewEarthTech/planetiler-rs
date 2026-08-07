@@ -29,6 +29,8 @@ on:
       - "services/cloud-runner/Dockerfile"
       # The box-side scripts baked into the image (keep in step with the
       # Dockerfile's COPY list; the laptop-side scripts don't rebuild it).
+      - "services/cloud-runner/run-job.sh"
+      - "services/cloud-runner/jobs.sh"
       - "services/cloud-runner/remote.sh"
       - "services/cloud-runner/remote-planet.sh"
       - "services/cloud-runner/tiles-delta.sh"
@@ -41,6 +43,8 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - "services/cloud-runner/Dockerfile"
+      - "services/cloud-runner/run-job.sh"
+      - "services/cloud-runner/jobs.sh"
       - "services/cloud-runner/remote.sh"
       - "services/cloud-runner/remote-planet.sh"
       - "services/cloud-runner/tiles-delta.sh"
