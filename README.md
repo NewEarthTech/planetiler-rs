@@ -1,5 +1,7 @@
 # planetiler-rs
 
+> **Status: parked (October 2026).** The experiment ran to its answer: the full planet, end to end, clean exit, receipts in [`bench/results/`](bench/results/). Java won the planet on wall clock, 4.5×, and [`planet-headtohead.md`](bench/results/planet-headtohead.md) names the levers that were next when the compute budget moved to paid work, so that's where it stopped. It stays public because the negative results are the useful part: every experiment marked FALSIFIED is something the next implementation gets to skip. If you want this architecture in production, [martin](https://github.com/maplibre/martin) is landing a native `generate` pipeline on the same design; watch there.
+
 A Rust port of [Planetiler](https://github.com/onthegomap/planetiler), the Java tool that turns OpenStreetMap extracts into Mapbox Vector Tile archives. Same job: read an `.osm.pbf`, write an `.mbtiles` you can serve to a map.
 
 Why port a thing that already works? Memory. Planetiler is fast, but it buys that speed with RAM: it wants a big heap, and the heap grows with the input. The bet here is that a streaming pipeline with disk-backed sorting and an off-heap node store can produce the same tiles in a fraction of the memory, and be quick enough that you don't mind. That's a testable claim, so we test it. Constantly.
@@ -14,7 +16,7 @@ Same task (all OSM features into one `osm` layer, à la Planetiler's `osm-qa`), 
 | rhode-island (49 MB) | 4.0 s / 1.1 GB | 8.94 s / 7.8 GB | ~2.2× faster | ~7× less |
 | great-britain (2.0 GB) | 153 s / 5.8 GB | 81 s / 29.1 GB | 1.9× slower | ~5× less |
 
-Yes, we lose one. Great Britain is right there in the table: Planetiler's mature parallel pipeline out-runs us at country scale, and pretending otherwise would defeat the entire point of keeping benchmarks. The gap was 4.1× before profiling; it's 1.9× now; the work continues. Full history (including the experiments that made things worse and got reverted) lives in [`bench/results/`](bench/results/).
+Yes, we lose one. Great Britain is right there in the table: Planetiler's mature parallel pipeline out-runs us at country scale, and pretending otherwise would defeat the entire point of keeping benchmarks. The gap was 4.1× before profiling; it was 1.9× when the project parked. Full history (including the experiments that made things worse and got reverted) lives in [`bench/results/`](bench/results/).
 
 ## Output parity, honestly stated
 
