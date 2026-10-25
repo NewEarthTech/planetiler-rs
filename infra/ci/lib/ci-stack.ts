@@ -7,7 +7,8 @@ import { Construct } from "constructs";
 // the 2026-07-24 transfer from the johncarmack1984 user (20649979) to the
 // NewEarthTech org (147949794), which broke the OIDC trust (every deploy failed
 // at AssumeRoleWithWebIdentity) until this owner id and the plain-name claim
-// below were updated. Re-run `just ci::deploy` after any future transfer.
+// below were updated. The subject below names the owner and repo too, so after
+// any future rename or transfer update it and re-run `just ci::deploy`.
 const GITHUB_OWNER_ID = "147949794"; // NewEarthTech org
 const GITHUB_REPO_ID = "1286483378";
 
@@ -27,16 +28,17 @@ export class PlanetilerRsCiStack extends cdk.Stack {
       assumedBy: new iam.FederatedPrincipal(
         `arn:aws:iam::${this.account}:oidc-provider/token.actions.githubusercontent.com`,
         {
+          // The subject GitHub's tokens carry for this repo's main, matched
+          // whole: the immutable form GitHub reports for this repo
+          // (`repo:owner@ownerId/repo@repoId:ref:…`), and the plain-name form
+          // in case the repo goes back to the default claim. No wildcard: IAM's
+          // `*` also matches `:`, `/` and `@`, and any repository can choose
+          // subject claims that carry these ids, so the earlier
+          // `repo:*@ownerId/*@repoId` form let other repositories' tokens match.
           StringEquals: {
             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          },
-          // Match both subject forms, pinned to main: the default plain-name
-          // claim (`repo:owner/repo:ref:…`) that the NewEarthTech org emits, and
-          // the id-carrying form (`repo:owner@ownerId/repo@repoId:ref:…`) in case
-          // the org configures customized claims the way the old owner did.
-          StringLike: {
             "token.actions.githubusercontent.com:sub": [
-              `repo:*@${GITHUB_OWNER_ID}/*@${GITHUB_REPO_ID}:ref:refs/heads/main`,
+              `repo:NewEarthTech@${GITHUB_OWNER_ID}/planetiler-rs@${GITHUB_REPO_ID}:ref:refs/heads/main`,
               "repo:NewEarthTech/planetiler-rs:ref:refs/heads/main",
             ],
           },
